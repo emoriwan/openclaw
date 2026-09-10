@@ -48,9 +48,11 @@ describe("normalizeAttachments", () => {
           {},
           { path: "/tmp/voice.ogg", contentType: "audio/ogg" },
           { url: "https://example.test/photo.jpg", contentType: "image/jpeg" },
+          { path: "/tmp/background.pdf", contentType: "application/pdf", contextOnly: true },
+          { path: "/tmp/current.pdf", contentType: "application/pdf" },
         ],
       }).map((attachment) => attachment.index),
-    ).toEqual([1, 2]);
+    ).toEqual([1, 2, 4]);
   });
 
   it("normalizes ordered facts", () => {

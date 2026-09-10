@@ -4,7 +4,27 @@
  * Prefer `createChannelHistoryWindow` for message-turn code. The lower-level map helpers are
  * deprecated plugin compatibility exports; core internals still use them behind the facade.
  */
+import type {
+  enrichConversationObservationMediaCore,
+  recordConversationObservationCore,
+} from "../config/sessions/conversation-history.js";
 export type { HistoryEntry, HistoryMediaEntry } from "../auto-reply/reply/history.types.js";
+export type {
+  ConversationHistoryCapture,
+  ConversationHistoryMessage,
+} from "../sessions/user-turn-input.types.js";
+
+export const recordConversationObservation: typeof recordConversationObservationCore = async (
+  ...args
+) => {
+  const history = await import("../config/sessions/conversation-history.js");
+  return history.recordConversationObservationCore(...args);
+};
+export const enrichConversationObservationMedia: typeof enrichConversationObservationMediaCore =
+  async (...args) => {
+    const history = await import("../config/sessions/conversation-history.js");
+    return history.enrichConversationObservationMediaCore(...args);
+  };
 export {
   createChannelHistoryWindow,
   type ChannelHistoryWindow,

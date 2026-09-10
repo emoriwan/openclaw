@@ -22,6 +22,7 @@ import type { GetReplyOptions, MsgContext } from "openclaw/plugin-sdk/reply-runt
 import { withEnvAsync } from "openclaw/plugin-sdk/test-env";
 import { createRequireRecord, sanitizeTerminalText } from "openclaw/plugin-sdk/test-fixtures";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createTelegramTopicCommandContext } from "./bot-native-commands.fixture-test-support.js";
 import {
   createTelegramNativeCommandTestDeps,
   telegramBotInfoForTest,
@@ -167,7 +168,8 @@ function makeMessagePolicyCase(params: {
         ? { id: -100123456789, type: "group", title: "Test Group" }
         : { id: 123456789, type: "private" },
       from: { id: 123456789, username: "testuser" },
-      text: "hello",
+      text: isGroup ? "@openclaw_bot hello" : "hello",
+      ...(isGroup ? { entities: [{ type: "mention", offset: 0, length: 13 }] } : {}),
       date: 1736380800,
       ...params.message,
     },
@@ -1802,7 +1804,8 @@ describe("createTelegramBot", () => {
           update: { update_id: 104 },
           message: {
             chat: { id: chatId, type: "supergroup", title: "OpenClaw Ops" },
-            text: "first",
+            text: "@openclaw_bot first",
+            entities: [{ type: "mention", offset: 0, length: 13 }],
             date: 1736380804,
             message_id: 104,
             from: { id: 42, first_name: "Ada" },
@@ -1820,7 +1823,8 @@ describe("createTelegramBot", () => {
           update: { update_id: 105 },
           message: {
             chat: { id: chatId, type: "supergroup", title: "OpenClaw Ops" },
-            text: "stop",
+            text: "/stop@openclaw_bot",
+            entities: [{ type: "bot_command", offset: 0, length: 18 }],
             date: 1736380805,
             message_id: 105,
             from: { id: 42, first_name: "Ada" },
@@ -2825,12 +2829,13 @@ describe("createTelegramBot", () => {
     expect(sendMessageSpy).not.toHaveBeenCalled();
   });
 
-  it("does not cache blocked group-sender edits into authorized prompt context", async () => {
+  it("filters observed group-sender edits under allowlist context visibility", async () => {
     loadConfig.mockReturnValue({
       channels: {
         telegram: {
           groupPolicy: "allowlist",
           allowFrom: ["123456789"],
+          contextVisibility: "allowlist",
           groups: { "*": { requireMention: false } },
         },
       },
@@ -2848,6 +2853,7 @@ describe("createTelegramBot", () => {
     ) => Promise<void>;
 
     await editedHandler({
+      update: { update_id: 416 },
       editedMessage: {
         chat: { id: -100123456789, type: "group", title: "Test Group" },
         message_id: 416,
@@ -2866,7 +2872,8 @@ describe("createTelegramBot", () => {
         chat: { id: -100123456789, type: "group", title: "Test Group" },
         message_id: 417,
         date: 1736380860,
-        text: "authorized follow-up",
+        text: "@openclaw_bot authorized follow-up",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         from: { id: 123456789, username: "allowed" },
       },
       me: { username: "openclaw_bot" },
@@ -2875,6 +2882,9 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).toHaveBeenCalledTimes(1);
     expect(replySpy.mock.calls.at(0)?.[0].ChannelStructuredContext).toBeUndefined();
+    const capture = replySpy.mock.calls.at(0)?.[0].ConversationHistory;
+    expect(capture).toBeDefined();
+    expect(await capture?.includeMessage?.({ sender: { id: "999999" } })).toBe(false);
     expect(sendMessageSpy).not.toHaveBeenCalled();
   });
 
@@ -3153,7 +3163,8 @@ describe("createTelegramBot", () => {
         chat: { id: -100777111222, type: "channel", title: "Wake Channel" },
         from: { id: 98765, is_bot: true, first_name: "wakebot", username: "wake_bot" },
         message_id: 777,
-        text: "wake check",
+        text: "@openclaw_bot wake check",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
       },
       me: { username: "openclaw_bot" },
@@ -3164,7 +3175,8 @@ describe("createTelegramBot", () => {
         chat: { id: -100777111222, type: "channel", title: "Wake Channel" },
         from: { id: 98765, is_bot: true, first_name: "wakebot", username: "wake_bot" },
         message_id: 777,
-        text: "wake check",
+        text: "@openclaw_bot wake check",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
       },
       me: { username: "openclaw_bot" },
@@ -3961,7 +3973,8 @@ describe("createTelegramBot", () => {
           is_direct_messages: true,
         },
         from: { id: 700, first_name: "Ada" },
-        text: "route this topic",
+        text: "@openclaw_bot route this topic",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
         message_id: 7700,
         direct_messages_topic: { topic_id: 77 },
@@ -4134,16 +4147,19 @@ describe("createTelegramBot", () => {
       },
       me: {},
     },
-  ] as const)("applies group mention overrides and fallback behavior %#", async (testCase) => {
-    resetHarnessSpies();
-    loadConfig.mockReturnValue(testCase.config);
-    await dispatchMessage({
-      message: testCase.message,
-      me: testCase.me,
-      botRequireMention: testCase.botRequireMention,
-    });
-    expect(replySpy).toHaveBeenCalledTimes(1);
-  });
+  ] as const)(
+    "does not activate unaddressed input through legacy mention settings %#",
+    async (testCase) => {
+      resetHarnessSpies();
+      loadConfig.mockReturnValue(testCase.config);
+      await dispatchMessage({
+        message: testCase.message,
+        me: testCase.me,
+        botRequireMention: testCase.botRequireMention,
+      });
+      expect(replySpy).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     {
@@ -4372,7 +4388,7 @@ describe("createTelegramBot", () => {
     });
   }
 
-  it("accepts mentionPatterns matches with and without unrelated mentions", async () => {
+  it("does not activate mentionPatterns with or without unrelated native mentions", async () => {
     const cases = [
       {
         name: "plain mention pattern text",
@@ -4383,7 +4399,6 @@ describe("createTelegramBot", () => {
           message_id: 1,
           from: { id: 9, first_name: "Ada" },
         },
-        assertEnvelope: true,
       },
       {
         name: "mention pattern plus another @mention",
@@ -4395,7 +4410,6 @@ describe("createTelegramBot", () => {
           message_id: 3,
           from: { id: 9, first_name: "Ada" },
         },
-        assertEnvelope: false,
       },
     ] as const;
 
@@ -4421,18 +4435,7 @@ describe("createTelegramBot", () => {
         message: testCase.message,
       });
 
-      expect(replySpy.mock.calls.length, testCase.name).toBe(1);
-      const payload = requireValue(replySpy.mock.calls.at(0), "replySpy call")[0];
-      expect(payload.WasMentioned, testCase.name).toBe(true);
-      if (testCase.assertEnvelope) {
-        expect(payload.SenderName).toBe("Ada");
-        expect(payload.SenderId).toBe("9");
-        const expectedTimestamp = formatEnvelopeTimestamp(new Date("2025-01-09T00:00:00Z"));
-        const timestampPattern = escapeRegExp(expectedTimestamp);
-        expect(payload.Body).toMatch(
-          new RegExp(`^\\[Telegram Test Group id:7 (\\+\\d+[smhd] )?${timestampPattern}\\]`),
-        );
-      }
+      expect(replySpy.mock.calls.length, testCase.name).toBe(0);
     }
   });
   it("marks explicit Telegram bot-handle mentions in the inbound context", async () => {
@@ -4486,7 +4489,8 @@ describe("createTelegramBot", () => {
     await dispatchMessage({
       message: {
         chat: { id: 42, type: "group", title: "Ops" },
-        text: "hello",
+        text: "@openclaw_bot hello",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
         message_id: 2,
         from: {
@@ -4529,7 +4533,8 @@ describe("createTelegramBot", () => {
     await dispatchMessage({
       message: {
         chat: { id: 7, type: "group", title: "Test Group" },
-        text: "bert hello",
+        text: "@openclaw_bot hello",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
         message_id: 123,
         from: { id: 9, first_name: "Ada" },
@@ -4562,14 +4567,12 @@ describe("createTelegramBot", () => {
         config: { messages: { groupChat: { mentionPatterns: ["\\bbert\\b"] } } },
         me: { username: "openclaw_bot" },
         expectedReplyCount: 0,
-        expectedWasMentioned: undefined,
       },
       {
         name: "mention detection unavailable",
         config: { messages: { groupChat: { mentionPatterns: [] } } },
         me: {},
-        expectedReplyCount: 1,
-        expectedWasMentioned: false,
+        expectedReplyCount: 0,
       },
     ] as const;
 
@@ -4597,10 +4600,6 @@ describe("createTelegramBot", () => {
       });
 
       expect(replySpy.mock.calls.length, testCase.name).toBe(testCase.expectedReplyCount);
-      if (testCase.expectedWasMentioned != null) {
-        const payload = requireValue(replySpy.mock.calls.at(0), "replySpy call")[0];
-        expect(payload.WasMentioned, testCase.name).toBe(testCase.expectedWasMentioned);
-      }
     }
   });
   it("includes reply-to context when a Telegram reply is received", async () => {
@@ -4717,7 +4716,8 @@ describe("createTelegramBot", () => {
       message: {
         chat: { id: -100123456789, type: "group", title: "Test Group" },
         from: { id: 123456789, username: "testuser" },
-        text: "/status",
+        text: "/status@openclaw_bot",
+        entities: [{ type: "bot_command", offset: 0, length: 20 }],
         date: 1736380800,
       },
       me: { username: "openclaw_bot" },
@@ -4999,7 +4999,7 @@ describe("createTelegramBot", () => {
       }
     }
   });
-  it("honors routed group activation from session store", async () => {
+  it("does not activate unaddressed input from a saved always setting", async () => {
     const storePath = path.join(createTelegramBotTestStateDir(), "group-activation.json");
     const routedGroupEntry = {
       sessionId: "agent:ops:telegram:group:123",
@@ -5047,7 +5047,7 @@ describe("createTelegramBot", () => {
       getFile: async () => ({ download: async () => new Uint8Array() }),
     });
 
-    expect(replySpy).toHaveBeenCalledTimes(1);
+    expect(replySpy).not.toHaveBeenCalled();
   });
 
   it("applies topic skill filters and system prompts", () => {
@@ -5145,7 +5145,7 @@ describe("createTelegramBot", () => {
     ) => Promise<void>;
 
     await handler({
-      ...makeForumGroupMessageCtx({ chatId, threadId: 99, text: "/status" }),
+      ...createTelegramTopicCommandContext({ chatId, threadId: 99, messageId: 42 }),
       match: "",
     });
 

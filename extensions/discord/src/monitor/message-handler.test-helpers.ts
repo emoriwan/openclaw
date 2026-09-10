@@ -38,8 +38,6 @@ export function createDiscordHandlerParams(overrides?: {
       },
     },
     botUserId: overrides?.botUserId ?? DEFAULT_DISCORD_BOT_USER_ID,
-    guildHistories: new Map(),
-    historyLimit: 0,
     mediaMaxBytes: 10_000,
     textLimit: 2_000,
     replyToMode: "off" as const,

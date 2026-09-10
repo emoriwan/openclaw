@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { MAX_IMAGE_BYTES } from "@openclaw/media-core/constants";
+import { projectRuntimeContextFragments } from "../../agents/embedded-agent-runner/run/attempt-llm-boundary.js";
 import { pruneProcessedHistoryImages } from "../../agents/embedded-agent-runner/run/history-image-prune.js";
 import {
   detectAndLoadPromptImages,
@@ -13,6 +14,7 @@ import {
   readPersistedImageBlockFactIndexes,
   type ImageFactIndex,
 } from "../../agents/embedded-agent-runner/run/prompt-image-metadata.js";
+import { AgentHarnessPreflightError } from "../../agents/harness/errors.js";
 import { resolveImageSanitizationLimits } from "../../agents/image-sanitization.js";
 import type { AgentMessage } from "../../agents/runtime/index.js";
 import type { SessionPlacementTurnParams } from "../../agents/session-placement-admission.js";
@@ -22,7 +24,11 @@ import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js"
 import { logWarn } from "../../logger.js";
 import { readLocalMediaFile } from "../../media/local-media-access.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
-import { readPersistedMediaFacts, type MediaFact } from "../../media/media-facts.js";
+import {
+  readPersistedMediaFacts,
+  readRuntimePromptMediaFacts,
+  type MediaFact,
+} from "../../media/media-facts.js";
 import { resolveMediaReferenceLocalPath } from "../../media/media-reference.js";
 import {
   ensureStagedInputDirectory,
@@ -79,6 +85,7 @@ export async function prepareWorkerTurnMedia(params: {
   signal: AbortSignal;
 }): Promise<{
   prompt: WorkerLaunchPlan["assignment"]["prompt"];
+  systemPrompt: WorkerLaunchPlan["assignment"]["systemPrompt"];
   history: AgentMessage[];
   images: Awaited<ReturnType<typeof detectAndLoadPromptImages>>["images"];
   imageFactIndexes: Awaited<ReturnType<typeof detectAndLoadPromptImages>>["imageFactIndexes"];
@@ -96,6 +103,7 @@ export async function prepareWorkerTurnMedia(params: {
     (await turn.userTurnTranscriptRecorder?.resolveMessage());
   assertCurrent();
   const recordedMedia = recorded ? readPersistedMediaFacts(recorded) : undefined;
+  const runtimeMedia = recorded ? readRuntimePromptMediaFacts(recorded) : undefined;
   const media = recordedMedia?.length ? recordedMedia : (turn.media ?? []);
   const localWorkspace = params.workspace.kind === "local" ? params.workspace.path : undefined;
   const workspaceOnly = resolveEffectiveToolFsWorkspaceOnly({
@@ -125,7 +133,7 @@ export async function prepareWorkerTurnMedia(params: {
     prompt: turn.prompt,
     existingImages: turn.images,
     imageOrder: turn.imageOrder,
-    media,
+    media: runtimeMedia ?? media,
     mediaImageLayout: recorded ? readPersistedMediaImageLayout(recorded) : undefined,
   });
   assertCurrent();
@@ -163,12 +171,17 @@ export async function prepareWorkerTurnMedia(params: {
   );
   const inputs = [current, ...replay.values()];
   // Stable names preserve edits; the same projection is used for first input and replay.
-  const projectedPaths = new Map<string, string>();
+  const projectedPaths = new Map<string, string | null>();
   let staging: Awaited<ReturnType<typeof tempWorkspace>> | undefined;
   try {
     let bytes = 0;
     const stagedPaths = new Set<string>();
-    const stageFile = async (data: Buffer, identity: string, fileName: string) => {
+    const stageFile = async (
+      data: Buffer,
+      identity: string,
+      fileName: string,
+      contextOnly = false,
+    ) => {
       assertCurrent();
       const directory = stagedInputDirectory(identity);
       const relative = path.posix.join(directory, stagedInputFileName(fileName));
@@ -178,15 +191,18 @@ export async function prepareWorkerTurnMedia(params: {
       if (stagedPaths.has(remotePath)) {
         return remotePath;
       }
-      bytes += data.length;
       if (
-        bytes > MAX_RECONCILIATION_TOTAL_BYTES ||
+        bytes + data.length > MAX_RECONCILIATION_TOTAL_BYTES ||
         stagedPaths.size >= MAX_RECONCILIATION_ENTRIES
       ) {
+        if (contextOnly) {
+          return null;
+        }
         throw new Error(
           "Cloud worker attachments exceed the workspace transfer budget; send fewer or smaller files.",
         );
       }
+      bytes += data.length;
       staging ??= await tempWorkspace({
         rootDir: resolvePreferredOpenClawTmpDir(),
         prefix: "worker-attachments-",
@@ -199,50 +215,88 @@ export async function prepareWorkerTurnMedia(params: {
       stagedPaths.add(remotePath);
       return remotePath;
     };
-    for (const input of inputs) {
-      for (const fact of input.media) {
-        const ref = resolveMediaFactLocalRef(fact);
-        if (!ref) {
-          continue;
+    for (const contextOnly of [false, true]) {
+      for (const input of inputs) {
+        for (const image of contextOnly ? [] : input.unownedImages) {
+          const data = Buffer.from(image.data, "base64");
+          const identity = createHash("sha256").update(data).digest("hex");
+          const remotePath = await stageFile(data, identity, "image");
+          if (remotePath) {
+            input.files.add(remotePath);
+          }
         }
-        let remotePath = projectedPaths.get(ref.raw);
-        if (!remotePath) {
-          let source: string;
-          let data: Buffer;
-          try {
-            source = path.resolve(
-              fact.workspaceDir ?? localWorkspace ?? params.remoteWorkspaceDir,
-              await resolveMediaReferenceLocalPath(ref.resolved),
-            );
-            assertCurrent();
-            data = await readLocalMediaFile(source, localRoots, {
-              maxBytes: Math.max(MAX_IMAGE_BYTES, MEDIA_MAX_BYTES),
-            });
-          } catch (error) {
-            assertCurrent();
-            if (input === current) {
-              throw error;
-            }
-            // Retention can expire replay sources; only current input requires availability.
-            // Keep authority checks and staging/transfer failures outside this omission policy.
-            logWarn("worker-media: Omitted an unavailable historical attachment source");
+        for (const [factIndex, fact] of input.media.entries()) {
+          if ((fact.contextOnly === true) !== contextOnly) {
             continue;
           }
-          assertCurrent();
-          const identity = createHash("sha256").update(source).digest("hex");
-          remotePath = await stageFile(data, identity, path.basename(source));
-          for (const alias of [ref.raw, ref.resolved, source, fact.path, fact.url]) {
+          const ref = resolveMediaFactLocalRef(fact);
+          if (!ref) {
+            continue;
+          }
+          const runtimeFact = input === current ? runtimeMedia?.[factIndex] : undefined;
+          const aliases = [
+            ref.raw,
+            ref.resolved,
+            fact.path,
+            fact.url,
+            runtimeFact?.path,
+            runtimeFact?.url,
+          ];
+          let remotePath = projectedPaths.get(ref.raw);
+          if (remotePath === null) {
+            if (input === current && fact.contextOnly !== true) {
+              throw new Error(
+                "Current attachment is unavailable; resend the attachment and retry.",
+              );
+            }
+            continue;
+          }
+          if (!remotePath) {
+            let source: string;
+            let data: Buffer;
+            try {
+              source = path.resolve(
+                fact.workspaceDir ?? localWorkspace ?? params.remoteWorkspaceDir,
+                await resolveMediaReferenceLocalPath(ref.resolved),
+              );
+              assertCurrent();
+              data = await readLocalMediaFile(source, localRoots, {
+                maxBytes: Math.max(MAX_IMAGE_BYTES, MEDIA_MAX_BYTES),
+              });
+            } catch (error) {
+              assertCurrent();
+              if (input === current && fact.contextOnly !== true) {
+                throw error;
+              }
+              // Retention can expire replay sources; only current input requires availability.
+              // Keep authority checks and staging/transfer failures outside this omission policy.
+              logWarn("worker-media: Omitted an unavailable historical attachment source");
+              for (const alias of aliases) {
+                if (alias) {
+                  projectedPaths.set(alias, null);
+                }
+              }
+              continue;
+            }
+            assertCurrent();
+            const identity = createHash("sha256").update(source).digest("hex");
+            remotePath = await stageFile(
+              data,
+              identity,
+              path.basename(source),
+              fact.contextOnly === true,
+            );
+            projectedPaths.set(source, remotePath);
+          }
+          for (const alias of aliases) {
             if (alias) {
               projectedPaths.set(alias, remotePath);
             }
           }
+          if (remotePath) {
+            input.files.add(remotePath);
+          }
         }
-        input.files.add(remotePath);
-      }
-      for (const image of input.unownedImages) {
-        const data = Buffer.from(image.data, "base64");
-        const identity = createHash("sha256").update(data).digest("hex");
-        input.files.add(await stageFile(data, identity, "image"));
       }
     }
     if (staging) {
@@ -265,10 +319,23 @@ export async function prepareWorkerTurnMedia(params: {
   const projectText = (text: string) => {
     let projected = text;
     for (const [source, destination] of projectedPaths) {
-      projected = projected.replaceAll(source, destination);
+      projected = projected.replaceAll(
+        source,
+        destination ?? "[attachment unavailable; ask the sender to resend it]",
+      );
     }
     return projected;
   };
+  const context = turn.currentInboundContext;
+  const contextFragments = (
+    context?.fragments ??
+    (context?.text ? [{ kind: "conversation-data" as const, text: context.text }] : [])
+  ).map(({ kind, text }) => ({ kind, text: projectText(text) }));
+  const contextText = contextFragments.map((fragment) => fragment.text).join("\n\n");
+  const renderedContext = projectRuntimeContextFragments(contextFragments);
+  const systemPrompt = renderedContext
+    ? [turn.extraSystemPrompt, renderedContext].filter(Boolean).join("\n\n")
+    : turn.extraSystemPrompt;
   const projectInput = (input: ReturnType<typeof prepareInput>) => {
     // Gateway bookkeeping is not part of the closed worker content contract.
     const parts = input.parts.map((part) =>
@@ -278,7 +345,7 @@ export async function prepareWorkerTurnMedia(params: {
     );
     const text = parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
     const notes = [...input.files]
-      .filter((file) => !text.includes(file))
+      .filter((file) => !text.includes(file) && (input !== current || !contextText.includes(file)))
       .map((file) => `[media attached: ${file}]`)
       .join("\n");
     if (notes) {
@@ -294,13 +361,22 @@ export async function prepareWorkerTurnMedia(params: {
   };
   const prompt = projectInput(current);
   if (
-    !isWorkerTranscriptMessageFrameSafe({ role: "user", content: prompt, timestamp: Date.now() })
+    !isWorkerTranscriptMessageFrameSafe({
+      role: "user",
+      content: [
+        ...prompt,
+        ...(renderedContext ? [{ type: "text" as const, text: renderedContext }] : []),
+      ],
+      timestamp: Date.now(),
+    })
   ) {
-    throw new Error(
-      "Cloud worker input exceeds its 25 MiB image or 64 KiB text/control limit; send fewer or smaller attachments.",
-    );
+    const userMessage =
+      "This request and its unread conversation exceed the worker's 64 KiB text or 25 MiB image limit. " +
+      "Use /new to start fresh without unread conversation; in a group, send it as a reply to this message. Then send a shorter request or smaller attachments.";
+    throw new AgentHarnessPreflightError(userMessage, { userMessage });
   }
   return {
+    systemPrompt,
     images: currentImages.images,
     imageFactIndexes: currentImages.imageFactIndexes,
     prompt: prompt.length === 1 && prompt[0]?.type === "text" ? prompt[0].text : prompt,

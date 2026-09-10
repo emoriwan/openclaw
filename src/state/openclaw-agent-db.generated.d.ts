@@ -103,6 +103,17 @@ export interface ConversationDeliveries {
   updated_at: number;
 }
 
+export interface ConversationHistory {
+  agent_id: string;
+  assigned_input_id: string | null;
+  consumed_session_id: string | null;
+  conversation_ref: string;
+  message_json: string;
+  seq: Generated<number>;
+  source_id: string;
+  submission_started: number | null;
+}
+
 export interface Conversations {
   account_id: string;
   channel: string;
@@ -527,6 +538,7 @@ export interface DB {
   cache_entries: CacheEntries;
   context_engine_turn_outbox: ContextEngineTurnOutbox;
   conversation_deliveries: ConversationDeliveries;
+  conversation_history: ConversationHistory;
   conversations: Conversations;
   heartbeat_outcomes: HeartbeatOutcomes;
   memory_embedding_cache: MemoryEmbeddingCache;

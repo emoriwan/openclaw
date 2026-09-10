@@ -7,6 +7,7 @@ import {
   resolveAgentWorkspaceDir,
   resolveSessionAgentId,
 } from "../../agents/agent-scope.js";
+import type { CurrentInboundPromptContext } from "../../agents/internal-runtime-context.js";
 import type { PreparedReplyDispatchRuntime } from "../../agents/prepared-model-runtime.types.js";
 import { normalizeExplicitSessionKey } from "../../config/sessions/explicit-session-key-normalization.js";
 import {
@@ -480,6 +481,21 @@ export async function gatherDispatchRequest(
     };
   };
   const hookState = buildHookState(hookCtx);
+  const replaceDispatchAgentText = (
+    text: string,
+    currentInboundContext?: CurrentInboundPromptContext,
+  ) => {
+    ctx.agentText = text;
+    ctx.BodyForAgent = text;
+    hookCtx.agentText = text;
+    hookCtx.BodyForAgent = text;
+    ctx.CurrentInboundContext = currentInboundContext;
+    hookCtx.CurrentInboundContext = currentInboundContext;
+    Object.assign(hookState, buildHookState(hookCtx));
+    hookState.inboundClaimEvent.content = text;
+    hookState.inboundClaimEvent.currentInboundContext = currentInboundContext;
+    bindReplyDispatcherConversationContext(dispatcher, text);
+  };
   const { isGroup, groupId } = hookState.hookContext;
   let hookMediaPrepared = false;
   let hookMediaMetadataStaged = false;
@@ -584,6 +600,7 @@ export async function gatherDispatchRequest(
     turnLedger,
     maybeApplyTtsWithFinalizationLease,
     hookRunner,
+    replaceDispatchAgentText,
     timestamp,
     messageIdForHook,
     isGroup,

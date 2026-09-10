@@ -33,6 +33,22 @@ function summaryMessages(type: "compaction" | "branch_summary", summary: string)
 }
 
 describe("projectContextEngineAssemblyForCodex", () => {
+  it("keeps full current inbound context outside the older-history trimming budget", () => {
+    const background = "current unread context ".repeat(8);
+    const history = "old ".repeat(100);
+    const request = "current request";
+    const input = {
+      promptText: background + history + request,
+      contextRange: { start: background.length, end: background.length + history.length },
+      preserveBeforeContext: true,
+    };
+    const fitted = fitCodexProjectedContextForTurnStart({ ...input, maxChars: 240 });
+    expect(fitted.startsWith(background)).toBe(true);
+    expect(fitted.endsWith(request)).toBe(true);
+    expect(() => fitCodexProjectedContextForTurnStart({ ...input, maxChars: 80 })).toThrow(
+      "Nothing was sent",
+    );
+  });
   it("charges restored file content to the selected window before reading older attachments", async () => {
     const older = textMessage("user", "older attachment");
     const recent = textMessage("user", "recent attachment");
@@ -549,23 +565,58 @@ describe("projectContextEngineAssemblyForCodex", () => {
     expect(fitted.endsWith("u".repeat(1_000))).toBe(true);
   });
 
-  it("never splits a UTF-16 surrogate pair at the truncation boundary", async () => {
+  it.each(["direct", "preserved", "projected", "appended"] as const)(
+    "rejects oversized current input without dropping unread messages (%s)",
+    (kind) => {
+      const context = "older context";
+      const request = "first unread message\n" + "x".repeat(420) + "\ncurrent request";
+      const prefix = kind === "projected" || kind === "appended" ? context : "";
+      const suffix = kind === "appended" ? "hook context" : "";
+      expect(() =>
+        fitCodexProjectedContextForTurnStart({
+          promptText: `${prefix}${request}${suffix}`,
+          ...(prefix ? { contextRange: { start: 0, end: prefix.length } } : {}),
+          ...(suffix
+            ? { requestRange: { start: prefix.length, end: prefix.length + request.length } }
+            : {}),
+          ...(kind === "preserved" ? { preservedRange: { start: 0, end: request.length } } : {}),
+          maxChars: 420,
+        }),
+      ).toThrow(
+        "Nothing was sent. Use /new to start fresh without unread conversation; in a group, send it as a reply to this message.",
+      );
+    },
+  );
+
+  it("accepts the complete Unicode request at the native character limit", () => {
+    const request = "😀".repeat(CODEX_TURN_START_TEXT_INPUT_MAX_CHARS);
+    expect(fitCodexProjectedContextForTurnStart({ promptText: request })).toBe(request);
+    expect(
+      fitCodexProjectedContextForTurnStart({
+        promptText: `older${request}`,
+        preservedRange: { start: 5, end: request.length + 5 },
+      }),
+    ).toBe(request);
+    expect(() => fitCodexProjectedContextForTurnStart({ promptText: request + "x" })).toThrow(
+      "1,048,576-character input limit",
+    );
+  });
+
+  it("never splits a UTF-16 surrogate pair at the context truncation boundary", async () => {
     // Drive the non-positive-budget path with an emoji (surrogate pair) sitting
     // across the kept-tail cut. A naive code-unit slice would orphan the low
     // surrogate into U+FFFD; the boundary must stay on a whole code point.
     const before = `OpenClaw assembled context for this turn:\n${"H".repeat(300)}`;
-    const context = "older context ".repeat(20);
-    // Emoji immediately before the user text so the cut can fall mid-pair.
+    const context = "older context 😀".repeat(20);
     const prompt = `\u{1F600}${"U".repeat(60)}`;
     const after = `\n</conversation_context>\n\nCurrent user request:\n${prompt}`;
     const promptText = `${before}${context}${after}`;
     const contextRange = { start: before.length, end: before.length + context.length };
 
-    // Sweep cap sizes around the cut so the test is not brittle to marker length;
-    // at least one value lands the boundary inside the surrogate pair.
-    for (let maxChars = 90; maxChars <= 140; maxChars += 1) {
+    for (let maxChars = 160; maxChars <= 210; maxChars += 1) {
       const fitted = fitCodexProjectedContextForTurnStart({ promptText, contextRange, maxChars });
-      expect(fitted.length).toBeLessThanOrEqual(maxChars);
+      expect(Array.from(fitted).length).toBeLessThanOrEqual(maxChars);
+      expect(fitted).toContain(prompt);
       // U+FFFD only appears when a lone surrogate is rendered, i.e. a split pair.
       expect(fitted).not.toContain("�");
       // Any surviving emoji must be the complete pair, not a lone low surrogate.

@@ -13,6 +13,11 @@ import {
 } from "../config/sessions/session-accessor.js";
 import { waitForSessionTranscriptProjection } from "../config/sessions/session-transcript-reconcile.js";
 import {
+  attachRuntimePromptMediaFacts,
+  readPersistedMediaFacts,
+  readRuntimePromptMediaFacts,
+} from "../media/media-facts.js";
+import {
   registerUserTurnTranscriptAdmissionOwner,
   resolveUserTurnTranscriptAdmission,
 } from "./user-turn-transcript-admission.js";
@@ -308,10 +313,27 @@ export function createUserTurnTranscriptRecorder(
       pendingInput = bindSessionPendingInputSources(sources, resolved);
       if (pendingInput) {
         message = pendingInput.message;
+        if (
+          readPersistedMediaFacts(message)?.length &&
+          params.pendingInputSources.some(
+            (source) => source.message && readRuntimePromptMediaFacts(source.message),
+          )
+        ) {
+          const runtimeMedia = params.pendingInputSources.flatMap((source) => {
+            const sourceMessage = source.message;
+            return sourceMessage
+              ? (readRuntimePromptMediaFacts(sourceMessage) ??
+                  readPersistedMediaFacts(sourceMessage) ??
+                  [])
+              : [];
+          });
+          attachRuntimePromptMediaFacts(message, runtimeMedia);
+        }
         resolvedMessagePromise = Promise.resolve(message);
       }
     }
-    return pendingInput?.message ?? resolved;
+    message = pendingInput?.message ?? resolved;
+    return message;
   };
 
   const notifyMessagePersisted = (persistedMessage?: PersistedUserTurnMessage) => {
@@ -541,6 +563,7 @@ export function createUserTurnTranscriptRecorder(
         pendingInput = await stageSessionPendingInput(target, {
           ...options,
           requestFingerprint: params.pendingInputRequestFingerprint,
+          conversationHistory: options.conversationHistory ?? params.conversationHistory,
           message: candidate,
           config: target.config as SessionTranscriptTurnPersistOptions["config"],
           prepareMessageAfterIdempotencyCheck: (next) =>
@@ -559,6 +582,7 @@ export function createUserTurnTranscriptRecorder(
       return staging;
     },
     getPendingInputMessage: () => pendingInput?.message,
+    beginSubmission: () => pendingInput?.beginSubmission() ?? { rejectSubmission: () => {} },
     isPendingInputConsumed: () => pendingInput?.state === "consumed",
     withPendingInput: (run) => (pendingInput ? pendingInput.run(run) : run()),
     finishPendingInput: (disposition) => {
@@ -611,6 +635,10 @@ export function createUserTurnTranscriptRecorder(
     getAdmissionReceipt: () => admissionReceipt,
     setAdmissionHandler: (handler) => (admissionHandler = handler),
     markSentToProvider: () => {
+      // Worker handoff can precede local adoption; reserve uncertainty before it can send.
+      if (!sentToProvider && !persisted && !runtimePersisted) {
+        pendingInput?.beginSubmission();
+      }
       sentToProvider = true;
     },
     markRuntimePersistencePending: (pending) => {

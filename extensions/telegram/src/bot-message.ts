@@ -60,7 +60,6 @@ type TelegramMessageProcessorDeps = Omit<
   | "storeAllowFrom"
   | "options"
   | "cfg"
-  | "historyLimit"
   | "dmHistoryLimit"
   | "dmPolicy"
   | "allowFrom"
@@ -125,7 +124,6 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
   const {
     bot,
     account,
-    groupHistories,
     logger,
     resolveGroupActivation,
     resolveGroupRequireMention,
@@ -146,14 +144,8 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     ...(telegramDeps.readSessionUpdatedAt
       ? { readSessionUpdatedAt: telegramDeps.readSessionUpdatedAt }
       : {}),
-    ...(telegramDeps.readAmbientTranscriptWatermark
-      ? { readAmbientTranscriptWatermark: telegramDeps.readAmbientTranscriptWatermark }
-      : {}),
     ...(telegramDeps.recordInboundSession
       ? { recordInboundSession: telegramDeps.recordInboundSession }
-      : {}),
-    ...(telegramDeps.resolveAmbientTranscriptWatermarkKey
-      ? { resolveAmbientTranscriptWatermarkKey: telegramDeps.resolveAmbientTranscriptWatermarkKey }
       : {}),
     ...(telegramDeps.resolveInboundLastRouteSessionKey
       ? { resolveInboundLastRouteSessionKey: telegramDeps.resolveInboundLastRouteSessionKey }
@@ -213,9 +205,7 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
       cfg: turnCfg,
       account,
       ownerAgentId: opts.ownerAgentId,
-      historyLimit: turnSettings.historyLimit,
       dmHistoryLimit: turnSettings.dmHistoryLimit,
-      groupHistories,
       dmPolicy: turnSettings.dmPolicy,
       allowFrom: turnSettings.allowFrom,
       groupAllowFrom: turnSettings.groupAllowFrom,

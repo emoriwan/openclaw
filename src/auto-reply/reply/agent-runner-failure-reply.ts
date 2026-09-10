@@ -232,7 +232,7 @@ export function buildPreflightCompactionFailureText(
   const summary = isTimeout
     ? "⚠️ Context is too large and auto-compaction timed out before it could finish."
     : "⚠️ Context is too large and auto-compaction could not recover this turn.";
-  return `${summary}${reasonSuffix} Try again, use /compact, or use /new to start a fresh session.`;
+  return `${summary}${reasonSuffix} Try again, use /compact, or use /new to start a fresh session; in a group, send the command as a reply to this message.`;
 }
 
 export function buildAuthProfileFailoverFailureText(error: unknown): string | null {
@@ -282,6 +282,9 @@ export function buildExternalRunFailureReply(
   // unattended in the owner's session, so they disclose it without the verbose
   // opt-in; raw thrown detail further below stays verbose-gated.
   if (isAgentHarnessPreflightError(error)) {
+    if (error.userMessage) {
+      return { text: error.userMessage, isGenericRunnerFailure: false };
+    }
     const sanitizedMessage = sanitizeUserFacingText(normalizedMessage, { errorContext: true });
     return {
       text: options?.isHeartbeat

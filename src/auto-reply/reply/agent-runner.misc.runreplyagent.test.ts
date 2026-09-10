@@ -29,7 +29,9 @@ import type { InboundEventKind } from "../../channels/inbound-event/kind.js";
 import { clearRuntimeConfigSnapshot, setRuntimeConfigSnapshot } from "../../config/config.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
+import { recordConversationObservationCore } from "../../config/sessions/conversation-history.js";
 import { loadSessionEntry, replaceSessionEntry } from "../../config/sessions/session-accessor.js";
+import { listSessionPendingInputs } from "../../config/sessions/session-accessor.pending-inputs.js";
 import {
   onAgentEvent as subscribeAgentEvent,
   type AgentEventPayload,
@@ -52,6 +54,7 @@ import {
   withPluginRuntimeGatewayRequestScope,
 } from "../../plugins/runtime/gateway-request-scope.js";
 import { GatewayDrainingError } from "../../process/command-queue.js";
+import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import {
   getReplyPayloadMetadata,
   markReplyPayloadForSourceSuppressionDelivery,
@@ -66,6 +69,10 @@ import {
   createTestTemplateContext,
 } from "./agent-runner.test-fixtures.js";
 import { clearPendingFinalDeliveryAfterSuccess } from "./dispatch-from-config.pending-final.js";
+import {
+  readObservedReplyInputOwner,
+  withObservedReplyInputOwner,
+} from "./observed-reply-input.js";
 import type { FollowupRun } from "./queue.js";
 import { enqueueFollowupRun, scheduleFollowupDrain } from "./queue.js";
 import { REPLY_OPERATION_RUN_STATE } from "./reply-operation-run-state.js";
@@ -497,8 +504,37 @@ describe("runReplyAgent pending operator input", () => {
       },
     });
 
+    const storePath = path.join(rootDir, "agents", "main", "sessions", "sessions.json");
+    const scope = { agentId: "main", storePath, sessionKey: "main", sessionId: "session" };
+    await replaceSessionEntry(scope, { sessionId: "session", updatedAt: Date.now() });
+    const capture = await recordConversationObservationCore(scope, {
+      conversationRef: "conv_question",
+      sourceId: "answer",
+      message: { text: "Green" },
+    });
+    const recorder = createUserTurnTranscriptRecorder({
+      input: { text: "Green", idempotencyKey: "answer" },
+      target: { ...scope, sessionEntry: { sessionId: "session", updatedAt: Date.now() } },
+    });
+
     try {
-      await expect(testRun.run()).resolves.toEqual({
+      await expect(
+        withObservedReplyInputOwner(capture, undefined, async (options) => {
+          const owner = readObservedReplyInputOwner(options)!;
+          await owner.prepare({
+            recorder,
+            runId: "answer",
+            assertCurrent: () => {},
+            cfg: {},
+            agentId: "main",
+            sessionKey: "main",
+            workspaceDir: rootDir,
+          });
+          testRun.followupRun.observedInput = owner;
+          testRun.followupRun.userTurnTranscriptRecorder = recorder;
+          return await testRun.run();
+        }),
+      ).resolves.toEqual({
         text: expect.stringContaining("pending question has no prepared creator authority"),
         isError: true,
       });
@@ -509,6 +545,7 @@ describe("runReplyAgent pending operator input", () => {
       expect(replyOperationRunState).toEqual({
         admission: { status: "skipped", reason: "question-response-refused" },
       });
+      expect(listSessionPendingInputs(scope).items[0]?.state).toBe("cancelled");
     } finally {
       reservation.dispose();
     }

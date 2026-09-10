@@ -638,7 +638,7 @@ describe("runEmbeddedAgent provider fault sequences", () => {
       expect(outcome.result.meta.error).toMatchObject({ kind: "context_overflow" });
       expect(outcome.result.payloads?.[0]).toMatchObject({
         isError: true,
-        text: expect.stringContaining("Try /reset (or /new)"),
+        text: expect.stringContaining("Use /new to start a fresh session"),
       });
       expect(outcome.attempts).toEqual([]);
       // Waiting cannot admit this request, so the profile must not be put in rate-limit cooldown.

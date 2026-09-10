@@ -1,8 +1,10 @@
 import { runWithDispatchAbortSignal } from "./dispatch-from-config.abort.js";
 import { createReplyDispatchEvent } from "./dispatch-from-config.events.js";
+import { shouldBypassPluginOwnedBindingForCommand } from "./dispatch-from-config.plugin-binding.js";
 import type { PrepareDispatchOperationReadyState } from "./dispatch-from-config.prepare-operation.js";
 import { runtimeTakeoverHooksAllowed } from "./dispatch-from-config.restricted-runtime.js";
 import type { DispatchFromConfigResult } from "./dispatch-from-config.types.js";
+import { prepareObservedReplyTakeover } from "./observed-reply-input.js";
 
 export function runReplyDispatchHook(
   state: PrepareDispatchOperationReadyState,
@@ -24,8 +26,25 @@ export function runReplyDispatchHook(
           options.isTailDispatch
             ? state.getDispatchAbortSignal()
             : state.getPreDispatchAbortSignal(),
-          () =>
-            hookRunner.runReplyDispatch(
+          async () => {
+            if (
+              state.hasAcpTranscriptTarget &&
+              (options.isTailDispatch ||
+                !shouldBypassPluginOwnedBindingForCommand(
+                  state.ctx,
+                  state.cfg,
+                  params.replyOptions,
+                )) &&
+              !(await prepareObservedReplyTakeover(state, state.acpDispatchSessionKey))
+            ) {
+              return {
+                handled: true,
+                queuedFinal: false,
+                counts: state.dispatcher.getQueuedCounts(),
+              };
+            }
+            state.getPreDispatchAbortSignal()?.throwIfAborted();
+            return await hookRunner.runReplyDispatch(
               createReplyDispatchEvent({
                 ctx: state.ctx,
                 runId: params.replyOptions?.runId,
@@ -62,7 +81,8 @@ export function runReplyDispatchHook(
                 recordProcessed: state.recordProcessed,
                 markIdle: state.markIdle,
               },
-            ),
+            );
+          },
           state.trackDispatchLifecycleWork,
         ),
     );

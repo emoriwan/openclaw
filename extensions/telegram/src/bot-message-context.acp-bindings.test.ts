@@ -165,7 +165,8 @@ describe("buildTelegramMessageContext ACP configured bindings", () => {
       message: {
         chat: { id: -1001234567890, type: "supergroup", title: "OpenClaw", is_forum: true },
         message_thread_id: 42,
-        text: "hello",
+        text: "@bot hello",
+        entities: [{ type: "mention", offset: 0, length: 4 }],
       },
     });
 
@@ -184,7 +185,8 @@ describe("buildTelegramMessageContext ACP configured bindings", () => {
       message: {
         chat: { id: -1001234567890, type: "supergroup", title: "OpenClaw", is_forum: true },
         message_thread_id: 42,
-        text: "hello",
+        text: "@bot hello",
+        entities: [{ type: "mention", offset: 0, length: 4 }],
       },
       resolveTelegramGroupConfig: () => ({
         groupConfig: { requireMention: false },
@@ -205,7 +207,8 @@ describe("buildTelegramMessageContext ACP configured bindings", () => {
       message: {
         chat: { id: -1001234567890, type: "supergroup", title: "OpenClaw", is_forum: true },
         message_thread_id: 42,
-        text: "/new",
+        text: "/new@bot",
+        entities: [{ type: "bot_command", offset: 0, length: 8 }],
       },
       cfg: {
         channels: {
@@ -235,7 +238,8 @@ describe("buildTelegramMessageContext ACP configured bindings", () => {
       message: {
         chat: { id: -1001234567890, type: "supergroup", title: "OpenClaw", is_forum: true },
         message_thread_id: 42,
-        text: "hello",
+        text: "@bot hello",
+        entities: [{ type: "mention", offset: 0, length: 4 }],
       },
     });
 

@@ -89,6 +89,7 @@ function appendQueueItem(params: {
   params.queue.lastEnqueuedAt = Date.now();
   params.queue.lastRun = params.run.run;
   params.run.queueAbortSignal = params.queue.abortController.signal;
+  params.run.observedInput?.transferToQueue();
   params.queue.items[params.front ? "unshift" : "push"](params.run);
   if (params.recentMessageIdKey) {
     recordRecentQueueMessageId(params.run, params.recentMessageIdKey);
@@ -235,7 +236,11 @@ export function enqueueFollowupRun(
         completeFollowupRunLifecycle(item);
       }
     },
-    isProtected: (item) => item.protectFromQueueOverflow === true || item.steerAnchor === true,
+    // Captured history survives eviction while remaining eligible for normal collection.
+    isProtected: (item) =>
+      item.protectFromQueueOverflow === true ||
+      item.steerAnchor === true ||
+      item.observedInput !== undefined,
   });
   if (queue.dropPolicy === "summarize") {
     const overflow = queue.summarySources.length - queue.summaryLines.length;

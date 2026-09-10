@@ -33,6 +33,7 @@ export function createTelegramPluginBase(params: {
   return {
     ...createTelegramSetupPluginBase(params),
     commands: {
+      groupActivationModes: ["mention"],
       nativeCommandsAutoEnabled: true,
       nativeSkillsAutoEnabled: true,
       buildCommandsListChannelData: buildTelegramCommandsListChannelData,

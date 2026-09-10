@@ -11,6 +11,7 @@ import {
 import { selectDiscordLivePolicyConfig } from "../live-policy-config.js";
 import { resolveDiscordToken } from "../token.js";
 import { resolveDiscordAllowlistConfig } from "./provider.allowlist.js";
+import { warnDiscordLegacyGroupContextConfig } from "./provider.config-log.js";
 import { resolveDiscordRestFetch } from "./rest-fetch.js";
 
 type ResolvedAllowlist = Awaited<ReturnType<typeof resolveDiscordAllowlistConfig>>;
@@ -46,6 +47,12 @@ export function createDiscordLivePolicyReader(params: {
   const runtime = params.runtime ?? createNonExitingRuntime();
   const startupConfig =
     params.discordConfig ?? mergeDiscordAccountConfig(params.cfg, params.accountId);
+  warnDiscordLegacyGroupContextConfig({
+    cfg: params.cfg,
+    discordConfig: startupConfig,
+    accountId: params.accountId,
+    runtime,
+  });
   const token =
     params.token ?? resolveDiscordToken(params.cfg, { accountId: params.accountId }).token;
   const fetcher = params.discordRestFetch ?? resolveDiscordRestFetch(startupConfig.proxy, runtime);
@@ -59,7 +66,7 @@ export function createDiscordLivePolicyReader(params: {
   // Public callers may supply prepared policy separately from cfg. Unrelated writes
   // preserve that seed; after an authored policy edit, omission means removal.
   let initialPolicyActive = true;
-  let cachedConfig: OpenClawConfig | undefined;
+  let cachedConfig: OpenClawConfig | undefined = params.cfg;
   let cachedPolicy: DiscordLivePolicy | undefined;
   let resolutionKey = JSON.stringify({
     guildEntries: startupPolicy.guilds,
@@ -116,6 +123,14 @@ export function createDiscordLivePolicyReader(params: {
         groupPolicy: discordConfig.groupPolicy,
         defaultGroupPolicy: cfg.channels?.defaults?.groupPolicy,
       });
+      if (cfg !== cachedConfig) {
+        warnDiscordLegacyGroupContextConfig({
+          cfg,
+          discordConfig: merged,
+          accountId: params.accountId,
+          runtime,
+        });
+      }
       cachedConfig = cfg;
       cachedPolicy = {
         isCurrent: () => {

@@ -16,8 +16,6 @@ export async function createBaseDiscordMessageContext(
     accountId: "default",
     token: "token",
     runtime: { log: () => {}, error: () => {} },
-    guildHistories: new Map(),
-    historyLimit: 0,
     mediaMaxBytes: 1024,
     textLimit: 4000,
     sender: { id: "U1", label: "user", name: "alice", isPluralKit: false },

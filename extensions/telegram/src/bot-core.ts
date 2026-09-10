@@ -16,7 +16,6 @@ import {
   resolveNativeCommandsEnabled,
   resolveNativeSkillsEnabled,
 } from "openclaw/plugin-sdk/native-command-config-runtime";
-import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
 import {
   danger,
   logVerbose,
@@ -33,10 +32,7 @@ import { resolveTelegramAccount } from "./accounts.js";
 import { normalizeTelegramApiRoot } from "./api-root.js";
 import type { TelegramBotDeps } from "./bot-deps.js";
 import { registerTelegramHandlers } from "./bot-handlers.runtime.js";
-import {
-  createTelegramMessageProcessor,
-  resolveTelegramMessageTurnSettings,
-} from "./bot-message.js";
+import { createTelegramMessageProcessor } from "./bot-message.js";
 import { defaultTelegramNativeCommandDeps } from "./bot-native-command-deps.runtime.js";
 import { registerTelegramNativeCommands } from "./bot-native-commands.js";
 import {
@@ -51,7 +47,6 @@ import { createTelegramUpdateTracker } from "./bot-update-tracker.js";
 import type { TelegramUpdateKeyContext } from "./bot-updates.js";
 import { apiThrottler, Bot, sequentialize, type ApiClientOptions } from "./bot.runtime.js";
 import type { TelegramBotOptions } from "./bot.types.js";
-import { buildTelegramGroupPeerId } from "./bot/helpers.js";
 import {
   setTelegramCallbackQueryAnswerPromise,
   startTelegramCallbackQueryAnswer,
@@ -66,11 +61,6 @@ import {
 } from "./client-fetch.js";
 import { resolveTelegramTransport } from "./fetch.js";
 import { resolveTelegramScopedGroupConfig } from "./group-config-helpers.js";
-import {
-  buildTelegramSelfSenderName,
-  recordTelegramGroupHistoryEntry,
-} from "./group-history-window.js";
-import { registerTelegramOutboundGroupHistoryRecorder } from "./outbound-message-context.js";
 import {
   prepareTelegramPollAnswerContext,
   settleTelegramPollAnswerContext,
@@ -130,6 +120,30 @@ export function createTelegramBotCore(
       })
     : null;
   const telegramCfg = account.config;
+  const groupScopes = Object.values(telegramCfg.groups ?? {}).flatMap((group) =>
+    [group].concat(Object.values(group.topics ?? {})),
+  );
+  const sharedGroupScopes = [
+    cfg.messages?.groupChat,
+    ...Object.values(cfg.agents?.entries ?? {}).map((agent) => agent.groupChat),
+  ];
+  if (
+    opts.requireMention === false ||
+    groupScopes.some((group) => group.requireMention === false) ||
+    telegramCfg.historyLimit !== undefined ||
+    telegramCfg.mentionPatterns !== undefined ||
+    sharedGroupScopes.some(
+      (group) =>
+        group &&
+        (group.unmentionedInbound !== undefined ||
+          group.historyLimit !== undefined ||
+          group.mentionPatterns?.length),
+    )
+  ) {
+    createSubsystemLogger("gateway/channels/telegram").warn(
+      `Telegram account ${account.accountId}: legacy group settings (requireMention:false, unmentionedInbound, mentionPatterns, historyLimit) are ignored. Groups require native tags, replies or bot-owned interactions; unread text is retained until the next addressed request. Existing config still starts; cleanup is optional.`,
+    );
+  }
 
   const telegramTransport =
     opts.telegramTransport ??
@@ -297,33 +311,6 @@ export function createTelegramBotCore(
     await next();
   });
 
-  const { historyLimit } = resolveTelegramMessageTurnSettings({
-    accountId: account.accountId,
-    cfg,
-    telegramCfg,
-    opts: runtimeOpts,
-  });
-  const groupHistories = new Map<string, HistoryEntry[]>();
-  const botHistorySender = buildTelegramSelfSenderName(account.name, opts.botInfo);
-  const unregisterOutboundGroupHistoryRecorder = registerTelegramOutboundGroupHistoryRecorder({
-    accountId: account.accountId,
-    recorder: (record) => {
-      if (!String(record.chatId).startsWith("-")) {
-        return;
-      }
-      recordTelegramGroupHistoryEntry({
-        historyMap: groupHistories,
-        historyKey: buildTelegramGroupPeerId(record.chatId, record.threadSpec),
-        limit: historyLimit,
-        entry: {
-          sender: botHistorySender,
-          body: record.text?.trim() || "<media>",
-          timestamp: record.timestamp,
-          messageId: String(record.messageId),
-        },
-      });
-    },
-  });
   const nativeEnabled = resolveNativeCommandsEnabled({
     providerId: "telegram",
     providerSetting: telegramCfg.commands?.native,
@@ -396,7 +383,6 @@ export function createTelegramBotCore(
   const processMessage = createTelegramMessageProcessor({
     bot,
     account,
-    groupHistories,
     logger,
     resolveGroupActivation,
     resolveGroupRequireMention,
@@ -470,7 +456,6 @@ export function createTelegramBotCore(
   const originalStop = bot.stop.bind(bot);
   bot.stop = ((...args: Parameters<typeof originalStop>) => {
     threadBindingManager?.stop();
-    unregisterOutboundGroupHistoryRecorder();
     return originalStop(...args);
   }) as typeof bot.stop;
 

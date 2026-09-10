@@ -620,6 +620,10 @@ function resetSessionAccessorMocks() {
           message,
           run: (operation) => operation(),
           finish: vi.fn(),
+          beginSubmission: () => {
+            options.assertCurrent();
+            return { rejectSubmission: () => {} };
+          },
         }
       : undefined;
   });

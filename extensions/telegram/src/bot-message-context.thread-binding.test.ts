@@ -111,7 +111,7 @@ describe("buildTelegramMessageContext thread binding override", () => {
     expect(ctx?.turn.record.updateLastRoute).toBeUndefined();
   });
 
-  it("bypasses mention gating for bound forum topic messages", async () => {
+  it("requires native addressing even for bound forum topic messages", async () => {
     resolveTelegramConversationRouteMock.mockReturnValue(
       createBoundRoute({
         accountId: "default",
@@ -135,8 +135,19 @@ describe("buildTelegramMessageContext thread binding override", () => {
       }),
     });
 
-    expect(ctx?.ctxPayload?.SessionKey).toBe("plugin-binding:openclaw-codex-app-server:session-1");
-    expect(ctx?.ctxPayload?.GroupRequireMention).toBe(true);
+    expect(ctx).toBeNull();
+    const addressed = await buildTelegramMessageContextForTest({
+      sessionRuntime: threadBindingSessionRuntime,
+      message: {
+        ...createForumTopicMessage(),
+        text: "@bot hello",
+        entities: [{ type: "mention", offset: 0, length: 4 }],
+      },
+    });
+    expect(addressed?.ctxPayload?.SessionKey).toBe(
+      "plugin-binding:openclaw-codex-app-server:session-1",
+    );
+    expect(addressed?.ctxPayload?.GroupRequireMention).toBe(true);
   });
 
   it("keeps mention gating for normal channel binding routes", async () => {

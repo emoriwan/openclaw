@@ -6,13 +6,13 @@ import type {
 } from "openclaw/plugin-sdk/channel-ingress-runtime";
 import type { OpenClawConfig, ReplyToMode } from "openclaw/plugin-sdk/config-contracts";
 import type { SessionBindingRecord } from "openclaw/plugin-sdk/conversation-runtime";
+import type { ConversationHistoryCapture } from "openclaw/plugin-sdk/reply-history";
 import type { resolveAgentRoute } from "openclaw/plugin-sdk/routing";
 import type { ChannelType, Client, User } from "../internal/discord.js";
 import type { DiscordChannelConfigResolved, DiscordGuildEntryResolved } from "./allow-list.js";
 import type { DiscordIngressLifecycle } from "./ingress.js";
 import type { DiscordAvatarResolver } from "./message-avatar.js";
 import type { DiscordChannelInfo } from "./message-channel-info.js";
-import type { DiscordHistoryEntry } from "./message-handler.history.js";
 import type { DiscordMediaInfo } from "./message-media.js";
 import type { DiscordThreadBindingLookup } from "./reply-delivery.js";
 import type { DiscordSenderIdentity } from "./sender-identity.js";
@@ -38,8 +38,6 @@ type DiscordMessagePreflightSharedFields = {
   buildContext?: BuildChannelInboundContext;
   botUserId?: string;
   abortSignal?: AbortSignal;
-  guildHistories: Map<string, DiscordHistoryEntry[]>;
-  historyLimit: number;
   mediaMaxBytes: number;
   textLimit: number;
   replyToMode: ReplyToMode;
@@ -114,7 +112,7 @@ export type DiscordMessagePreflightContext = DiscordMessagePreflightSharedFields
   inboundEventKind: InboundEventKind;
   canDetectMention: boolean;
 
-  historyEntry?: DiscordHistoryEntry;
+  conversationHistory?: ConversationHistoryCapture;
   threadBindings: DiscordThreadBindingLookup;
   discordRestFetch?: typeof fetch;
 };

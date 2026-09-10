@@ -8,6 +8,7 @@ import {
   type OpenClawAgentDatabase,
   type OpenClawAgentDatabaseOptions,
 } from "../../state/openclaw-agent-db.js";
+import { pruneConsumedConversationHistory } from "./conversation-history.js";
 import {
   measureSessionPhysicalDiskUsage,
   pruneSessionTranscriptArchivesToHighWater,
@@ -164,6 +165,7 @@ async function pruneCanonicalSessionTranscriptArchivesToHighWater(params: {
             .where("session_id", "=", row.session_id)
             .where("generation", "=", row.generation),
         );
+        pruneConsumedConversationHistory(transactionDb, row.session_id);
       }, params.databaseOptions),
     );
     await reclaimSqliteFreePages(params.databaseOptions);

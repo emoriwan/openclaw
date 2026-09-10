@@ -295,7 +295,7 @@ describe("discord native /status", () => {
     expect(interaction.reply).not.toHaveBeenCalled();
   });
 
-  it("passes through the effective guild activation when requireMention is disabled", async () => {
+  it("reports mention activation even when legacy requireMention is disabled", async () => {
     const cfg = createConfig({ requireMention: false });
     const command = await createStatusCommand(cfg);
     const interaction = createInteraction({
@@ -310,6 +310,6 @@ describe("discord native /status", () => {
     const statusCall = firstStatusCall();
     expect(statusCall.channel).toBe("discord");
     expect(statusCall.isGroup).toBe(true);
-    expect(statusCall.defaultGroupActivation()).toBe("always");
+    expect(statusCall.defaultGroupActivation()).toBe("mention");
   });
 });

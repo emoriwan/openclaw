@@ -16,6 +16,7 @@ import {
   createCodexSteeringQueue,
   type CodexSteeringQueueOptions,
 } from "./attempt-steering.js";
+import { fitCodexProjectedContextForTurnStart } from "./context-engine-projection.js";
 import { CodexAppServerEventProjector } from "./event-projector.js";
 import { createCodexNativeMcpAppResultDetailsPreparer } from "./native-mcp-app.js";
 import { canonicalizeNativeProgressCardInput } from "./plan-compaction-state.js";
@@ -25,6 +26,7 @@ import { readBoundedCodexRemoteWorkspaceFile } from "./remote-workspace-media.js
 import type { CodexAttemptLifecycleController } from "./run-attempt-lifecycle-controller.js";
 import type { CodexAttemptNotificationController } from "./run-attempt-notification-controller.js";
 import type { CodexAttemptResources } from "./run-attempt-resources.js";
+import { prependCurrentInboundContext } from "./run-attempt-state.js";
 import type { CodexAttemptTurnState } from "./run-attempt-turn-state.js";
 import {
   codexTranscriptMirrorRuntime,
@@ -340,9 +342,12 @@ export function activateCodexAttemptTurn(
     signal: runAbortController.signal,
     assertActive: assertSteeringActive,
     prepareMessage: async (text, options) => {
+      const preparedPrompt = fitCodexProjectedContextForTurnStart({
+        promptText: prependCurrentInboundContext(text, options.currentInboundContext),
+      });
       const result = await detectAndLoadAgentHarnessPromptImages({
         ...imageContext,
-        prompt: text,
+        prompt: preparedPrompt,
         existingImages: options.images,
         imageOrder: options.imageOrder,
         media: options.media,
@@ -353,7 +358,7 @@ export function activateCodexAttemptTurn(
           `failed to hydrate ${result.failedMediaCount} structured image attachment(s) for Codex steering`,
         );
       }
-      return buildCodexUserInput(text, result.images);
+      return buildCodexUserInput(preparedPrompt, result.images);
     },
     beforeSubmit: async (items) => {
       // Commit preceding answers and user custody before Codex can act on the

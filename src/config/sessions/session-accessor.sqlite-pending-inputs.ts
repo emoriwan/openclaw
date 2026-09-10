@@ -13,8 +13,12 @@ import {
 import { stageSqliteTransactionState } from "../../infra/sqlite-post-commit.js";
 import type { PersistedUserTurnMessage } from "../../sessions/user-turn-transcript.types.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
+import { hasConversationHistorySchema } from "../../state/openclaw-agent-conversation-history-schema.js";
 import type { SessionPendingInputs } from "../../state/openclaw-agent-db.generated.js";
-import type { OpenClawAgentDatabase } from "../../state/openclaw-agent-db.js";
+import type {
+  OpenClawAgentDatabase,
+  OpenClawAgentDatabaseOptions,
+} from "../../state/openclaw-agent-db.js";
 import {
   ensureSessionPendingInputsSchema,
   hasSessionPendingInputsSchema,
@@ -44,6 +48,7 @@ export type SessionPendingInputOwner = {
   sessionId: string;
   sessionKey: string;
   databasePath: string;
+  databaseOptions: OpenClawAgentDatabaseOptions;
   idempotencyKey: string;
   lifecycleGeneration: string;
   messageJson: string;
@@ -215,8 +220,7 @@ export function claimCurrentSessionPendingInputDedupeRecovery(
     recoveredDedupeOwners.has(owner) ||
     owner.databasePath !== database.path ||
     owner.sessionId !== scope.sessionId ||
-    owner.sessionKey !== scope.sessionKey ||
-    owner.idempotencyKey !== `${runId}:user`
+    owner.sessionKey !== scope.sessionKey
   ) {
     return false;
   }
@@ -399,8 +403,21 @@ export function resolveSessionPendingInputAppend(
 export function consumeSessionPendingInput(
   database: PendingInputDatabase,
   pending: SessionPendingInputAppend,
+  sessionId: string,
 ): void {
   if (!pending.alreadyPromoted) {
+    // Adoption consumes the captured sources before deleting pending custody;
+    // otherwise its foreign key would release those sources for replay.
+    if (hasConversationHistorySchema(database.db)) {
+      executeSqliteQuerySync(
+        database.db,
+        getSessionKysely(database.db)
+          .updateTable("conversation_history")
+          .set({ consumed_session_id: sessionId, assigned_input_id: null })
+          .where("assigned_input_id", "in", [...(pending.sourceInputIds ?? [pending.inputId])])
+          .where("consumed_session_id", "is", null),
+      );
+    }
     if (pending.sourceInputIds) {
       const updated = executeSqliteQuerySync(
         database.db,

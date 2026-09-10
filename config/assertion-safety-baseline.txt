@@ -367,7 +367,7 @@ extensions/discord/src/monitor/message-forwarded.ts	7
 extensions/discord/src/monitor/message-handler.batch-gate.ts	1
 extensions/discord/src/monitor/message-handler.hydration.ts	12
 extensions/discord/src/monitor/message-handler.preflight-helpers.ts	5
-extensions/discord/src/monitor/message-handler.preflight.ts	2
+extensions/discord/src/monitor/message-handler.preflight.ts	1
 extensions/discord/src/monitor/message-handler.process.ts	1
 extensions/discord/src/monitor/message-text.ts	3
 extensions/discord/src/monitor/model-picker-preferences-migrations.ts	5
@@ -1187,7 +1187,7 @@ extensions/telegram/src/bot-info-cache.ts	2
 extensions/telegram/src/bot-info.ts	1
 extensions/telegram/src/bot-message-context.body.ts	1
 extensions/telegram/src/bot-message-context.session.ts	2
-extensions/telegram/src/bot-message-context.ts	3
+extensions/telegram/src/bot-message-context.ts	2
 extensions/telegram/src/bot-message-dispatch-draft.ts	5
 extensions/telegram/src/bot-message-dispatch-reply.ts	2
 extensions/telegram/src/bot-message-dispatch-session.ts	1
@@ -1207,7 +1207,6 @@ extensions/telegram/src/doctor.ts	12
 extensions/telegram/src/fetch.ts	13
 extensions/telegram/src/forum-service-message.ts	1
 extensions/telegram/src/group-config-helpers.ts	1
-extensions/telegram/src/group-history-window.ts	1
 extensions/telegram/src/inline-buttons.ts	1
 extensions/telegram/src/interactive-fallback.ts	1
 extensions/telegram/src/lane-delivery-text-deliverer.ts	1
@@ -2091,9 +2090,7 @@ src/auto-reply/reply/directive-handling.shared.ts	2
 src/auto-reply/reply/directives.ts	2
 src/auto-reply/reply/dispatch-acp.ts	2
 src/auto-reply/reply/dispatch-from-config.events.ts	1
-src/auto-reply/reply/dispatch-from-config.plugin-binding.ts	1
 src/auto-reply/reply/dispatch-from-config.prepare-execution.ts	1
-src/auto-reply/reply/dispatch-from-config.prepare-operation.ts	1
 src/auto-reply/reply/elevated-allowlist-matcher.ts	2
 src/auto-reply/reply/exec/directive.ts	1
 src/auto-reply/reply/followup-delivery-payloads.ts	1

@@ -1,10 +1,10 @@
 import {
   embeddedAgentLog,
   formatErrorMessage,
+  neutralizeQuotedContextSelectionSigils,
   type EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { CodexAppServerRpcError } from "./client.js";
-import { neutralizeCodexExplicitMentionSigils } from "./context-engine-projection.js";
 import { isJsonObject } from "./protocol.js";
 import type {
   CodexAppServerBindingIdentity,
@@ -90,6 +90,6 @@ export function prependCurrentInboundContext(
   // current request; Codex must not resolve explicit mentions from it.
   const text = context?.text.trim();
   return text
-    ? [neutralizeCodexExplicitMentionSigils(text), prompt].filter(Boolean).join("\n\n")
+    ? [neutralizeQuotedContextSelectionSigils(text), prompt].filter(Boolean).join("\n\n")
     : prompt;
 }

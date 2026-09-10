@@ -1,3 +1,4 @@
+import type { ConversationHistoryCapture } from "../../sessions/user-turn-input.types.js";
 import type { ConversationRouteContext } from "./conversation-route-context.js";
 import type {
   SessionLifecycleArchivedTranscript,
@@ -46,6 +47,7 @@ export type ProjectedLifecycleMutation = {
     expectedEntry: SessionEntry | undefined;
     routeContext?: ConversationRouteContext | null;
     resetBoundary?: SessionResetBoundaryWrite;
+    conversationHistoryReset?: ConversationHistoryCapture;
     sessionKey: string;
   }>;
 };

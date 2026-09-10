@@ -35,6 +35,7 @@ export type { HistoryEntry } from "./history.types.js";
 export function buildHistoryContext(params: {
   historyText: string;
   currentMessage: string;
+  historyMarker?: string;
   lineBreak?: string;
 }): string {
   const { historyText, currentMessage } = params;
@@ -42,9 +43,13 @@ export function buildHistoryContext(params: {
   if (!historyText.trim()) {
     return currentMessage;
   }
-  return [HISTORY_CONTEXT_MARKER, historyText, "", CURRENT_MESSAGE_MARKER, currentMessage].join(
-    lineBreak,
-  );
+  return [
+    params.historyMarker ?? HISTORY_CONTEXT_MARKER,
+    historyText,
+    "",
+    CURRENT_MESSAGE_MARKER,
+    currentMessage,
+  ].join(lineBreak);
 }
 
 /** Appends one history entry, enforces per-session limit, and refreshes LRU key order. */

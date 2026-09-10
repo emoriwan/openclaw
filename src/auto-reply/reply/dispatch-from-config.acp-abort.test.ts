@@ -6,6 +6,7 @@ import type {
   SessionAcpMeta,
 } from "../../acp/control-plane/manager.types.js";
 import { resolveAcpSessionTarget } from "../../acp/control-plane/manager.utils.js";
+import { AgentHarnessPreflightError } from "../../agents/harness/errors.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type {
   AcpRuntime,
@@ -14,6 +15,12 @@ import type {
   AcpRuntimeHandle,
   AcpRuntimeTurnInput,
 } from "../../plugin-sdk/acp-runtime.js";
+import type {
+  PluginHookInboundClaimEvent,
+  PluginHookReplyDispatchContext,
+  PluginHookReplyDispatchEvent,
+} from "../../plugins/hook-types.js";
+import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { createInternalHookEventPayload } from "../../test-utils/internal-hook-event-payload.js";
 import { markCommandReplyForDelivery } from "../reply-payload.js";
 import {
@@ -240,6 +247,227 @@ describe("dispatchReplyFromConfig ACP abort", () => {
     agentEventMocks.onAgentEvent.mockReset().mockImplementation(() => () => {});
     setNoAbort();
   });
+
+  it.each([false, true])(
+    "keeps ordinary room preparation unchanged when an unbound hook declines (existing: %s)",
+    async (existing) => {
+      sessionStoreMocks.currentEntry = existing
+        ? { sessionId: "ordinary", updatedAt: Date.now() }
+        : undefined;
+      hookMocks.runner.runReplyDispatch.mockResolvedValue(undefined);
+      const replyResolver = vi.fn<
+        NonNullable<Parameters<typeof dispatchReplyFromConfig>[0]["replyResolver"]>
+      >(async (ctx, options) => {
+        expect(ctx.agentText).toBe("Summarize");
+        expect(options?.userTurnTranscriptRecorder).toBeUndefined();
+        return undefined;
+      });
+      await dispatchReplyFromConfig({
+        ctx: buildTestCtx({
+          Provider: "discord",
+          Surface: "discord",
+          SessionKey: "agent:main:discord:channel:ordinary",
+          BodyForAgent: "Summarize",
+          MessageSid: `ordinary-${existing}`,
+          ConversationHistory: {
+            owner: { agentId: "main", databasePath: "/tmp/mock-agent.sqlite" },
+            conversationRef: "conv_ordinary",
+            throughSequence: 1,
+            requestSourceIds: ["request"],
+          },
+        }),
+        cfg: {},
+        dispatcher: createDispatcher(),
+        replyResolver,
+      });
+      expect(replyResolver).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("supplies the captured prompt and its recorder before an ACP takeover can handle the turn", async () => {
+    const sessionKey = "agent:main:acp:observed";
+    const entry = { sessionId: "observed-session", updatedAt: Date.now() };
+    sessionStoreMocks.currentEntry = entry;
+    acpMocks.readAcpSessionEntry.mockReturnValue({
+      sessionKey,
+      storeSessionKey: sessionKey,
+      cfg: {},
+      storePath: "/tmp/mock-sessions.json",
+      entry,
+      acp: {
+        backend: "acpx",
+        agent: "fixture-agent",
+        runtimeSessionName: "runtime:observed",
+        mode: "persistent",
+        state: "idle",
+        lastActivityAt: Date.now(),
+      },
+    });
+    const capture = {
+      owner: { agentId: "main", databasePath: "/tmp/mock-agent.sqlite" },
+      conversationRef: "conv_observed",
+      throughSequence: 2,
+      requestSourceIds: ["request"],
+    };
+    const recorder = createUserTurnTranscriptRecorder({
+      input: { text: "Summarize", idempotencyKey: "request" },
+      target: { agentId: "main", sessionKey, sessionId: entry.sessionId, sessionEntry: entry },
+    });
+    const capturedText =
+      "[Earlier chat messages - for context]\nFriend: Friday\n\n[Current message - respond to this]\nSummarize";
+    recorder.stageApproved = vi.fn(async () => true);
+    recorder.getPendingInputMessage = () => ({ role: "user", content: capturedText, timestamp: 1 });
+    const persist = vi.fn(async () => undefined);
+    recorder.persistApproved = persist;
+    recorder.hasPersisted = () => persist.mock.calls.length > 0;
+    let deliveredText: string | undefined;
+    hookMocks.runner.runReplyDispatch.mockImplementation(async (eventUnknown, contextUnknown) => {
+      const event = eventUnknown as PluginHookReplyDispatchEvent;
+      const context = contextUnknown as PluginHookReplyDispatchContext;
+      deliveredText = event.ctx.agentText;
+      expect(context.userTurnTranscriptRecorder).toBe(recorder);
+      await context.userTurnTranscriptRecorder?.persistApproved();
+      return { handled: true, queuedFinal: false, counts: { tool: 0, block: 0, final: 0 } };
+    });
+    const replyResolver = vi.fn(async () => undefined);
+    await dispatchReplyFromConfig({
+      ctx: buildTestCtx({
+        Provider: "discord",
+        Surface: "discord",
+        SessionKey: sessionKey,
+        OriginatingChannel: "discord",
+        OriginatingTo: "channel:observed",
+        To: "channel:observed",
+        AccountId: "default",
+        BodyForAgent: "Summarize",
+        MessageSid: "request",
+        ConversationHistory: capture,
+      }),
+      cfg: { acp: { enabled: true, dispatch: { enabled: true } } },
+      dispatcher: createDispatcher(),
+      replyOptions: { userTurnTranscriptRecorder: recorder },
+      replyResolver,
+    });
+    expect(deliveredText).toBe(capturedText);
+    expect(recorder.stageApproved).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationHistory: capture }),
+    );
+    expect(persist).toHaveBeenCalledOnce();
+    expect(replyResolver).not.toHaveBeenCalled();
+  });
+
+  it.each(["handled", "declined", "error", "preflight"] as const)(
+    "keeps opaque native binding control separate from transcript custody (%s)",
+    async (status) => {
+      const sourceKey = "agent:main:discord:channel:native";
+      const nativeBindingKey = "plugin-binding:fixture-native:thread-17";
+      const entry = { sessionId: "native-source-session", updatedAt: Date.now() };
+      sessionStoreMocks.currentEntry = entry;
+      sessionStoreMocks.loadSessionStoreEntry.mockImplementation((input: unknown) => {
+        const params = input as { sessionKey?: string };
+        return params.sessionKey === sourceKey ? entry : undefined;
+      });
+      sessionBindingMocks.resolveByConversation.mockReturnValue({
+        bindingId: "native-binding",
+        targetSessionKey: nativeBindingKey,
+        targetKind: "session",
+        status: "active",
+        boundAt: 1,
+        conversation: { channel: "discord", accountId: "default", conversationId: "native" },
+        metadata: {
+          pluginBindingOwner: "plugin",
+          pluginId: "fixture-native",
+          pluginRoot: "/plugins/fixture-native",
+        },
+      });
+      hookMocks.registry.plugins = [{ id: "fixture-native", status: "loaded" }];
+      const capture = {
+        owner: { agentId: "main", databasePath: "/tmp/mock-agent.sqlite" },
+        conversationRef: "conv_native",
+        throughSequence: 2,
+        requestSourceIds: ["native-request"],
+      };
+      const recorder = createUserTurnTranscriptRecorder({
+        input: { text: "Summarize", idempotencyKey: "native-request" },
+        target: {
+          agentId: "main",
+          sessionKey: sourceKey,
+          sessionId: entry.sessionId,
+          sessionEntry: entry,
+        },
+      });
+      const capturedText = "Friend: Friday\nSummarize";
+      recorder.stageApproved = vi.fn(async () => true);
+      recorder.getPendingInputMessage = () => ({
+        role: "user",
+        content: capturedText,
+        timestamp: 1,
+      });
+      const persist = vi.fn<typeof recorder.persistApproved>(async () => undefined);
+      recorder.persistApproved = persist;
+      const finishPendingInput = vi.fn();
+      recorder.finishPendingInput = finishPendingInput;
+      let submissionStarted = false;
+      const rejectSubmission = vi.fn(() => {
+        submissionStarted = false;
+      });
+      recorder.beginSubmission = vi.fn(() => {
+        submissionStarted = true;
+        return { rejectSubmission };
+      });
+      hookMocks.runner.runInboundClaimForPluginOutcome.mockImplementation(
+        async (_plugin, rawEvent) => {
+          const event = rawEvent as PluginHookInboundClaimEvent;
+          expect(event.content).toBe(capturedText);
+          expect(submissionStarted).toBe(true);
+          return status === "handled"
+            ? { status, result: { handled: true } }
+            : status === "preflight"
+              ? {
+                  status: "error",
+                  error: "input too large",
+                  preflightError: new AgentHarnessPreflightError("input too large", {
+                    userMessage: "Nothing was sent. Use /new, then send a shorter request.",
+                  }),
+                }
+              : status === "error"
+                ? { status, error: "native submission uncertain" }
+                : { status };
+        },
+      );
+      await dispatchReplyFromConfig({
+        ctx: buildTestCtx({
+          Provider: "discord",
+          Surface: "discord",
+          OriginatingChannel: "discord",
+          OriginatingTo: "channel:native",
+          To: "channel:native",
+          AccountId: "default",
+          SessionKey: sourceKey,
+          BodyForAgent: "Summarize",
+          MessageSid: "native-request",
+          ConversationHistory: capture,
+        }),
+        cfg: {},
+        dispatcher: createDispatcher(),
+        replyOptions: { userTurnTranscriptRecorder: recorder },
+      });
+      expect(hookMocks.runner.runInboundClaimForPluginOutcome).toHaveBeenCalledOnce();
+      expect(persist).toHaveBeenCalledTimes(status === "handled" ? 1 : 0);
+      if (status === "handled") {
+        expect(persist.mock.calls[0]?.[0]?.target).toMatchObject({
+          sessionKey: sourceKey,
+          sessionId: entry.sessionId,
+        });
+      }
+      expect(finishPendingInput).toHaveBeenCalledExactlyOnceWith(
+        status === "error" ? "interrupted" : "cancelled",
+      );
+      const definitelyRejected = status === "declined" || status === "preflight";
+      expect(rejectSubmission).toHaveBeenCalledTimes(definitelyRejected ? 1 : 0);
+      expect(submissionStarted).toBe(!definitelyRejected);
+    },
+  );
 
   it("aborts ACP dispatch promptly when the caller abort signal fires", async () => {
     const releaseTurn = createDeferred();

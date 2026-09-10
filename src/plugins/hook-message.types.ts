@@ -1,3 +1,4 @@
+import type { CurrentInboundPromptContext } from "../agents/internal-runtime-context.js";
 import type { MessageHookMediaFact } from "../hooks/message-hook-media.js";
 import type { DiagnosticTraceContext } from "../infra/diagnostic-trace-context.js";
 import type { PluginConversationBinding } from "./conversation-binding.types.js";
@@ -122,6 +123,7 @@ export type PluginHookInboundClaimContext = PluginHookMessageContext & {
 };
 
 export type PluginHookInboundClaimEvent = {
+  currentInboundContext?: CurrentInboundPromptContext;
   content: string;
   body?: string;
   bodyForAgent?: string;

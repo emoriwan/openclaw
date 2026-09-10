@@ -33,6 +33,9 @@ describe("formatAssistantErrorText", () => {
   it("returns a friendly message for context overflow", () => {
     const msg = makeAssistantError("request_too_large");
     expect(formatAssistantErrorText(msg)).toContain("Context overflow");
+    expect(formatAssistantErrorText(msg)).toContain(
+      "in a group, send it as a reply to this message",
+    );
   });
   it("returns context overflow for Anthropic 'Request size exceeds model context window'", () => {
     // This Anthropic shape must map to context overflow so auto-compaction can

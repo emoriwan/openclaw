@@ -29,6 +29,7 @@ import {
 import { normalizeGroupActivation } from "../auto-reply/group-activation.js";
 import { resolveSelectedAndActiveModel } from "../auto-reply/model-runtime.js";
 import type { ThinkLevel } from "../auto-reply/thinking.js";
+import { getChannelPlugin } from "../channels/plugins/index.js";
 import { toAgentModelListLike } from "../config/model-input.js";
 import type { SessionEntry } from "../config/sessions.js";
 import { hasSessionAutoModelFallbackProvenance } from "../config/sessions/model-override-provenance.js";
@@ -546,9 +547,18 @@ export async function buildStatusReplyParts(
       verboseEnabled,
     });
   }
-  const groupActivation = isGroup
+  const configuredGroupActivation = isGroup
     ? (normalizeGroupActivation(sessionEntry?.groupActivation) ?? defaultGroupActivation())
     : undefined;
+  const supportedActivationModes = isGroup
+    ? getChannelPlugin(statusChannel)?.commands?.groupActivationModes
+    : undefined;
+  const groupActivation =
+    configuredGroupActivation &&
+    supportedActivationModes &&
+    !supportedActivationModes.includes(configuredGroupActivation)
+      ? supportedActivationModes[0]
+      : configuredGroupActivation;
   const agentDefaults = cfg.agents?.defaults ?? {};
   const agentConfig = resolveAgentConfig(cfg, statusAgentId);
   const effectiveFastMode =

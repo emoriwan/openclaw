@@ -12,7 +12,7 @@ import type {
   TelegramGroupConfig,
   TelegramTopicConfig,
 } from "openclaw/plugin-sdk/config-contracts";
-import type { HistoryEntry } from "openclaw/plugin-sdk/reply-history";
+import type { ConversationHistoryCapture } from "openclaw/plugin-sdk/reply-history";
 import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
 import type { TelegramMediaKind } from "./bot/body-helpers.js";
 import type { TelegramThreadSpec } from "./bot/helpers.js";
@@ -35,6 +35,7 @@ export type TelegramChannelIngressResolver = (
 ) => Promise<ResolvedChannelMessageIngress>;
 
 export type TelegramMessageContextOptions = {
+  conversationHistory?: ConversationHistoryCapture;
   threadSpec?: TelegramThreadSpec;
   commandSource?: "text" | "native";
   forceWasMentioned?: boolean;
@@ -42,9 +43,8 @@ export type TelegramMessageContextOptions = {
   receivedAtMs?: number;
   ingressBuffer?: "inbound-debounce" | "text-fragment";
   promptContextMinTimestampMs?: number;
-  promptContextAmbientWatermark?: TelegramAmbientTranscriptWatermark;
-  ambientTranscriptBody?: string;
   bufferedMessages?: readonly Message[];
+  bufferedUpdateIds?: readonly (number | undefined)[];
   spooledReplay?: boolean;
   /** Use an attempt-local participant so an outer retry loop owns final spool settlement. */
   isolateSpooledReplaySettlement?: boolean;
@@ -54,11 +54,6 @@ export type TelegramMessageContextOptions = {
 export type TelegramPromptContextEntry = NonNullable<
   MsgContext["ChannelStructuredContext"]
 >[number];
-
-export type TelegramAmbientTranscriptWatermark = {
-  messageId: string;
-  timestampMs?: number;
-};
 
 export type TelegramLogger = {
   info: (obj: Record<string, unknown>, msg: string) => void;
@@ -94,8 +89,6 @@ export type TelegramMessageContextSessionRuntimeOverrides = Partial<
     | "buildChannelInboundEventContext"
     | "readSessionUpdatedAt"
     | "recordInboundSession"
-    | "readAmbientTranscriptWatermark"
-    | "resolveAmbientTranscriptWatermarkKey"
     | "resolveInboundLastRouteSessionKey"
     | "resolvePinnedMainDmOwnerFromAllowlist"
     | "resolveStorePath"
@@ -114,9 +107,7 @@ export type BuildTelegramMessageContextParams = {
   cfg: OpenClawConfig;
   account: { accountId: string };
   ownerAgentId?: string;
-  historyLimit: number;
   dmHistoryLimit: number;
-  groupHistories: Map<string, HistoryEntry[]>;
   dmPolicy: DmPolicy;
   allowFrom?: Array<string | number>;
   groupAllowFrom?: Array<string | number>;

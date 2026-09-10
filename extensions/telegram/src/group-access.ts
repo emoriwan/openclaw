@@ -90,6 +90,32 @@ export const evaluateTelegramGroupBaseAccess = (params: {
   return { allowed: true };
 };
 
+/** Shared sender gate for invocation and configured ingestion after room observation. */
+export function isTelegramGroupSenderAuthorized(params: {
+  groupConfig?: TelegramGroupConfig | TelegramDirectConfig;
+  topicConfig?: TelegramTopicConfig;
+  effectiveGroupAllow: NormalizedAllowFrom;
+  senderId: string;
+  senderUsername?: string;
+}): boolean {
+  return (
+    evaluateTelegramGroupBaseAccess({
+      ...params,
+      isGroup: true,
+      hasGroupAllowOverride:
+        params.topicConfig?.allowFrom !== undefined || params.groupConfig?.allowFrom !== undefined,
+      enforceAllowOverride: true,
+      requireSenderForAllowOverride: false,
+    }).allowed &&
+    (!params.effectiveGroupAllow.hasEntries ||
+      isSenderAllowed({
+        allow: params.effectiveGroupAllow,
+        senderId: params.senderId,
+        senderUsername: params.senderUsername,
+      }))
+  );
+}
+
 type TelegramGroupPolicyBlockReason =
   | "group-policy-disabled"
   | "group-policy-allowlist-no-sender"

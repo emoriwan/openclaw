@@ -12,17 +12,12 @@ import {
 import { createRequireRecord, importFreshModule } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { markdownToTelegramHtml, telegramHtmlToPlainTextFallback } from "./format.js";
-import {
-  recordTelegramGroupHistoryEntry,
-  selectTelegramGroupHistoryAfterLastSelf,
-} from "./group-history-window.js";
 import { resolveTelegramMessageCacheScope } from "./message-cache-persistence.js";
 import {
   buildTelegramConversationContext,
   createTelegramMessageCache,
   hasProviderObservedTelegramThreadBinding,
 } from "./message-cache.js";
-import { registerTelegramOutboundGroupHistoryRecorder } from "./outbound-message-context.js";
 import {
   beginTelegramPollRegistration,
   getPreparedTelegramPollAnswer,
@@ -5987,52 +5982,10 @@ describe("editMessageTelegram", () => {
     expect(hasProviderObservedTelegramThreadBinding(cached, 77)).toBe(true);
   });
 
-  it("refreshes edited group messages without duplicating self history or hiding later replies", async () => {
+  it("refreshes edited group context without replaying an outbound message", async () => {
     const storePath = `/tmp/openclaw-telegram-edit-history-${process.pid}-${Date.now()}.json`;
     const cfg = { session: { store: storePath } };
     const chat = { id: -100123, type: "supergroup" as const, title: "Ops" };
-    const historyKey = `${chat.id}:topic:77`;
-    const groupHistory = new Map<
-      string,
-      Array<{ sender: string; body: string; messageId: string; timestamp: number }>
-    >();
-    recordTelegramGroupHistoryEntry({
-      historyMap: groupHistory,
-      historyKey,
-      limit: 50,
-      entry: {
-        sender: "OpenClaw (you)",
-        body: "original response",
-        messageId: "902",
-        timestamp: 1_779_394_740_000,
-      },
-    });
-    recordTelegramGroupHistoryEntry({
-      historyMap: groupHistory,
-      historyKey,
-      limit: 50,
-      entry: {
-        sender: "Teammate",
-        body: "context that must remain visible",
-        messageId: "903",
-        timestamp: 1_779_394_741_000,
-      },
-    });
-    const unregister = registerTelegramOutboundGroupHistoryRecorder({
-      accountId: "default",
-      recorder: (record) =>
-        recordTelegramGroupHistoryEntry({
-          historyMap: groupHistory,
-          historyKey,
-          limit: 50,
-          entry: {
-            sender: "OpenClaw (you)",
-            body: record.text ?? "<media>",
-            messageId: String(record.messageId),
-            timestamp: record.timestamp ?? 0,
-          },
-        }),
-    });
     botApi.editMessageText.mockResolvedValue({
       chat,
       message_id: 902,
@@ -6042,23 +5995,10 @@ describe("editMessageTelegram", () => {
       text: "authoritative edited response",
     });
 
-    try {
-      await editMessageTelegram(chat.id, 902, "authoritative edited response", {
-        token: "42:test-token",
-        cfg,
-      });
-    } finally {
-      unregister();
-    }
-
-    const entries = groupHistory.get(historyKey) ?? [];
-    expect(entries.map((entry) => entry.messageId)).toEqual(["902", "903"]);
-    expect(selectTelegramGroupHistoryAfterLastSelf(entries)).toEqual([
-      expect.objectContaining({
-        sender: "Teammate",
-        body: "context that must remain visible",
-      }),
-    ]);
+    await editMessageTelegram(chat.id, 902, "authoritative edited response", {
+      token: "42:test-token",
+      cfg,
+    });
     const cached = await createTelegramMessageCache({
       scope: resolveTelegramMessageCacheScope(storePath),
     }).get({ accountId: "default", chatId: chat.id, messageId: "902" });

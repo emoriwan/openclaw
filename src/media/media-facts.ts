@@ -33,6 +33,8 @@ export type MediaFact = {
   // reprojection boundary; described images otherwise rehydrate or count failed.
   // Structured persistence may retain it; legacy Media* projections never emit it.
   hydrationSuppressed?: boolean;
+  /** Observed background attachment: readable on demand, not required for the current request. */
+  contextOnly?: true;
 };
 
 export type MediaFactInput = {
@@ -242,6 +244,7 @@ export function canonicalizePersistedUserMessageMedia<T extends object>(
       ...(fact.workspaceDir ? { workspaceDir: fact.workspaceDir } : {}),
       ...(fact.staged || stagedMedia?.[index]?.staged ? { staged: true } : {}),
       ...(fact.hydrationSuppressed ? { hydrationSuppressed: true } : {}),
+      ...(fact.contextOnly ? { contextOnly: true } : {}),
     });
   }
 
@@ -403,6 +406,7 @@ function normalizeMediaFact<TInput extends MediaFactInput>(
     ...(workspaceDir ? { workspaceDir } : {}),
     ...(input.staged === true ? { staged: true } : {}),
     ...(input.hydrationSuppressed === true ? { hydrationSuppressed: true } : {}),
+    ...(input.contextOnly === true ? { contextOnly: true } : {}),
   };
 }
 
@@ -498,6 +502,7 @@ function resolveMediaFactsWithPrecedence(
             source.MediaStaged === true &&
             (!legacyHasPath || Boolean(normalizeOptionalString(legacyPath)))),
         hydrationSuppressed: fact?.hydrationSuppressed,
+        contextOnly: fact?.contextOnly,
       },
       index,
     );

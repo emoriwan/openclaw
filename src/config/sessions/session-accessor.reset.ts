@@ -4,6 +4,7 @@ import {
   normalizeAgentId,
   parseAgentSessionKey,
 } from "../../routing/session-key.js";
+import type { ConversationHistoryCapture } from "../../sessions/user-turn-input.types.js";
 import { createLazyRuntimeModule } from "../../shared/lazy-runtime.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
 import type { ConversationRouteContext } from "./conversation-route-context.js";
@@ -189,6 +190,7 @@ export async function commitReplySessionInitialization(params: {
   /** Authoritative contextual route facts observed by the admitted inbound turn. */
   routeContext?: ConversationRouteContext | null;
   resetBoundary?: SessionResetBoundaryWrite;
+  conversationHistoryReset?: ConversationHistoryCapture;
   previousEntry?: SessionEntry;
   retiredEntry?: SessionEntryRetirement;
   sessionEntry: SessionEntry;
@@ -229,6 +231,9 @@ export async function commitReplySessionInitialization(params: {
       sessionKey: resolved.normalizedKey,
       ...(params.routeContext !== undefined ? { routeContext: params.routeContext } : {}),
       ...(params.resetBoundary ? { resetBoundary: params.resetBoundary } : {}),
+      ...(params.conversationHistoryReset
+        ? { conversationHistoryReset: params.conversationHistoryReset }
+        : {}),
       buildEntry: async ({ currentEntry: commitEntry }) => {
         const commitRevision = createReplySessionInitializationRevision(commitEntry);
         if (commitRevision !== params.expectedRevision) {

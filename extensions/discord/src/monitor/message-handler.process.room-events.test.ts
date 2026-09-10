@@ -10,7 +10,6 @@ import {
   getLastDispatchCtx,
   getLastDispatchReplyOptions,
   getLastRouteUpdate,
-  discordInboundEventDelivery,
   readSessionUpdatedAt,
   runProcessDiscordMessage,
   sendMocksForTest as sendMocks,
@@ -100,121 +99,6 @@ describe("processDiscordMessage session routing and room events", () => {
     expect(getLastDispatchReplyOptions()?.sourceReplyDeliveryMode).toBe("message_tool_only");
     expect(getReactionEmojis()).toEqual(["👀"]);
     expect(sendMocks.removeReactionDiscord).not.toHaveBeenCalled();
-  });
-
-  it("records Discord room events in history while source replies are tool-only", async () => {
-    const guildHistories = new Map();
-    const ctx = await createBaseContext({
-      guildHistories,
-      historyLimit: 10,
-      shouldRequireMention: false,
-      effectiveWasMentioned: false,
-      inboundEventKind: "room_event",
-      baseSessionKey: BASE_CHANNEL_ROUTE.sessionKey,
-      route: BASE_CHANNEL_ROUTE,
-      sender: { id: "U1", label: "user", name: "alice", isPluralKit: false },
-    });
-
-    await runProcessDiscordMessage(ctx);
-
-    expect(getLastDispatchReplyOptions()?.sourceReplyDeliveryMode).toBe("message_tool_only");
-    expect(getLastDispatchReplyOptions()?.suppressTyping).toBe(true);
-    expect(getLastDispatchReplyOptions()?.queuedDeliveryCorrelations).toHaveLength(1);
-    expect(guildHistories.get("c1")).toMatchObject([
-      {
-        body: "hi",
-        messageId: "m1",
-        sender: "Alice",
-        senderProvenance: {
-          id: "U1",
-          memberRoleIds: [],
-        },
-      },
-    ]);
-  });
-
-  it("clears Discord room event history after a visible action send succeeds", async () => {
-    const guildHistories = new Map();
-    dispatchInboundMessage.mockImplementationOnce(async () => {
-      discordInboundEventDelivery.notify({
-        sessionKey: BASE_CHANNEL_ROUTE.sessionKey,
-        inboundEventKind: "room_event",
-        to: "channel:c1",
-        accountId: "default",
-      });
-      return createNoQueuedDispatchResult();
-    });
-    const ctx = await createBaseContext({
-      guildHistories,
-      historyLimit: 10,
-      shouldRequireMention: false,
-      effectiveWasMentioned: false,
-      inboundEventKind: "room_event",
-      baseSessionKey: BASE_CHANNEL_ROUTE.sessionKey,
-      route: BASE_CHANNEL_ROUTE,
-    });
-
-    await runProcessDiscordMessage(ctx);
-
-    expect(guildHistories.get("c1")).toEqual([]);
-  });
-
-  it("clears Discord group DM room event history after a visible action send succeeds", async () => {
-    const guildHistories = new Map();
-    dispatchInboundMessage.mockImplementationOnce(async () => {
-      discordInboundEventDelivery.notify({
-        sessionKey: BASE_CHANNEL_ROUTE.sessionKey,
-        inboundEventKind: "room_event",
-        to: "channel:c1",
-        accountId: "default",
-      });
-      return createNoQueuedDispatchResult();
-    });
-    const ctx = await createBaseContext({
-      guildHistories,
-      historyLimit: 10,
-      isGuildMessage: false,
-      isGroupDm: true,
-      isDirectMessage: false,
-      shouldRequireMention: false,
-      effectiveWasMentioned: false,
-      inboundEventKind: "room_event",
-      baseSessionKey: BASE_CHANNEL_ROUTE.sessionKey,
-      route: BASE_CHANNEL_ROUTE,
-    });
-
-    await runProcessDiscordMessage(ctx);
-
-    expect(guildHistories.get("c1")).toEqual([]);
-    expect(getLastDispatchCtx()?.GroupRequireMention).toBe(false);
-  });
-
-  it("clears Discord room event history after a queued core send succeeds", async () => {
-    const guildHistories = new Map();
-    const ctx = await createBaseContext({
-      guildHistories,
-      historyLimit: 10,
-      shouldRequireMention: false,
-      effectiveWasMentioned: false,
-      inboundEventKind: "room_event",
-      baseSessionKey: BASE_CHANNEL_ROUTE.sessionKey,
-      route: BASE_CHANNEL_ROUTE,
-    });
-
-    await runProcessDiscordMessage(ctx);
-
-    const begin = getLastDispatchReplyOptions()?.queuedDeliveryCorrelations?.[0]?.begin;
-    expect(begin).toBeTypeOf("function");
-    const end = begin?.();
-    discordInboundEventDelivery.notify({
-      sessionKey: BASE_CHANNEL_ROUTE.sessionKey,
-      inboundEventKind: "room_event",
-      to: "channel:c1",
-      accountId: "default",
-    });
-    end?.();
-
-    expect(guildHistories.get("c1")).toEqual([]);
   });
 
   it("uses PluralKit original ids for inbound dedupe while preserving the Discord message id", async () => {

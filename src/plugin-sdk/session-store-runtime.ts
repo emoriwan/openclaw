@@ -55,6 +55,7 @@ import {
 } from "./session-store-runtime-internal.js";
 import type { SessionTranscriptEvent } from "./session-transcript-runtime.js";
 export { SessionStoreAgentIdRequiredError } from "../config/sessions/paths.js";
+export { buildConversationIdentity };
 
 export {
   deliveryContextFromSession,

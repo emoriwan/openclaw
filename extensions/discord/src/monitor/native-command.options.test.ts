@@ -4,10 +4,15 @@ import type { ChatCommandDefinition } from "openclaw/plugin-sdk/command-auth-nat
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import {
+  createTestRegistry,
+  setActivePluginRegistry,
+} from "openclaw/plugin-sdk/plugin-test-runtime";
+import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
 } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { discordPlugin } from "../../api.js";
 import { createDiscordLivePolicyReader } from "./live-policy.js";
 import type { DiscordLivePolicy, DiscordLivePolicyReader } from "./live-policy.js";
 
@@ -246,6 +251,16 @@ describe("createDiscordNativeCommand option wiring", () => {
 
   afterEach(() => {
     clearRuntimeConfigSnapshot();
+    setActivePluginRegistry(createTestRegistry([]));
+  });
+
+  it("registers only supported activation choices and descriptions", () => {
+    setActivePluginRegistry(
+      createTestRegistry([{ pluginId: "discord", source: "test", plugin: discordPlugin }]),
+    );
+    const mode = requireOption(createNativeCommand("activation"), "mode");
+    expect(readChoices(mode)).toEqual([{ name: "mention", value: "mention" }]);
+    expect(mode.description).toBe("mention");
   });
 
   it("uses autocomplete for /acp action so inline action values are accepted", async () => {

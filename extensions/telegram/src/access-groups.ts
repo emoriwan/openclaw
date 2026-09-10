@@ -1,6 +1,7 @@
 // Telegram plugin module implements access groups behavior.
 import type { DmPolicy, OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
+  evaluateSupplementalContextVisibility,
   expandAllowFromWithAccessGroups,
   parseAccessGroupAllowFromEntry,
 } from "openclaw/plugin-sdk/security-runtime";
@@ -10,6 +11,44 @@ import {
   normalizeDmAllowFromWithStore,
   type NormalizedAllowFrom,
 } from "./bot-access.js";
+
+/** Access-group expansion belongs to the speaker being shown, not the requester. */
+export function createTelegramSupplementalContextChecker(params: {
+  cfg: OpenClawConfig;
+  allowFrom?: Array<string | number>;
+  accountId: string;
+  isGroup: boolean;
+  mode: Parameters<typeof evaluateSupplementalContextVisibility>[0]["mode"];
+}) {
+  return async (speaker: {
+    kind: Parameters<typeof evaluateSupplementalContextVisibility>[0]["kind"];
+    senderId?: string;
+    senderUsername?: string;
+  }): Promise<boolean> => {
+    if (!params.isGroup) {
+      return true;
+    }
+    const allow = normalizeAllowFrom(
+      await expandTelegramAllowFromWithAccessGroups({
+        cfg: params.cfg,
+        allowFrom: params.allowFrom,
+        accountId: params.accountId,
+        senderId: speaker.senderId,
+      }),
+    );
+    return evaluateSupplementalContextVisibility({
+      mode: params.mode,
+      kind: speaker.kind,
+      senderAllowed:
+        !allow.hasEntries ||
+        isSenderAllowed({
+          allow,
+          senderId: speaker.senderId,
+          senderUsername: speaker.senderUsername,
+        }),
+    }).include;
+  };
+}
 
 export async function expandTelegramAllowFromWithAccessGroups(params: {
   cfg?: OpenClawConfig;

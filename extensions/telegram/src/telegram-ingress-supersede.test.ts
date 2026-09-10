@@ -338,6 +338,7 @@ describe("telegram ingress supersede policy", () => {
 
   it("rejects supersede when topic allowFrom excludes the sender despite account allowFrom *", async () => {
     const topicRestrictedAuth = {
+      botUsername: "mybot",
       cfg: {
         channels: {
           telegram: {
@@ -362,7 +363,8 @@ describe("telegram ingress supersede policy", () => {
     const shouldSupersedeTopic = createShouldSupersedeTelegramSpooledPending(topicRestrictedAuth);
     const strangerInRestrictedTopic = messageUpdate({
       updateId: 2,
-      text: "stop",
+      text: "/stop@mybot",
+      entities: [{ type: "bot_command", offset: 0, length: 11 }],
       senderId: STRANGER_ID,
       chatId: -1001,
       chatType: "supergroup",
@@ -389,7 +391,8 @@ describe("telegram ingress supersede policy", () => {
     // Topic-allowlisted owner can still supersede.
     const ownerInRestrictedTopic = messageUpdate({
       updateId: 3,
-      text: "stop",
+      text: "/stop@mybot",
+      entities: [{ type: "bot_command", offset: 0, length: 11 }],
       senderId: OWNER_ID,
       chatId: -1001,
       chatType: "supergroup",
@@ -417,6 +420,7 @@ describe("telegram ingress supersede policy", () => {
     },
   ])("uses channel-DM topic authorization: $name", async (testCase) => {
     const channelDmAuth = {
+      botUsername: "mybot",
       cfg: {
         channels: {
           telegram: {
@@ -435,7 +439,8 @@ describe("telegram ingress supersede policy", () => {
     };
     const update = messageUpdate({
       updateId: 2,
-      text: "stop",
+      text: "/stop@mybot",
+      entities: [{ type: "bot_command", offset: 0, length: 11 }],
       senderId: OWNER_ID,
       chatId: -1001,
       chatType: "supergroup",

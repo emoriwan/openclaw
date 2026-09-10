@@ -2,6 +2,7 @@ import path from "node:path";
 import { expect, it, vi } from "vitest";
 import * as sqliteQueries from "../../infra/kysely-sync.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import { recordConversationObservationCore } from "./conversation-history.js";
 import {
   applySessionEntryLifecycleMutation,
   commitReplySessionInitialization,
@@ -9,7 +10,78 @@ import {
   loadSessionEntry,
   upsertSessionEntryCore,
 } from "./session-accessor.js";
+import { stageSessionPendingInput } from "./session-accessor.pending-inputs.js";
 import type { SessionEntry } from "./types.js";
+
+it.each([false, true])(
+  "resets unread conversation only with the matching lifecycle commit (stale: %s)",
+  async (stale) => {
+    await withOpenClawTestState({ label: "reply-unread-reset" }, async (state) => {
+      const sessionKey = "agent:main:reply";
+      const scope = {
+        agentId: "main",
+        sessionKey,
+        storePath: path.join(state.sessionsDir("main"), "sessions.json"),
+      };
+      const entry = { sessionId: "reply", updatedAt: Date.now() };
+      await upsertSessionEntryCore(scope, entry);
+      const observe = (sourceId: string, conversationRef = "current-room") =>
+        recordConversationObservationCore(scope, {
+          sourceId,
+          conversationRef,
+          message: { text: sourceId },
+        });
+      await observe("before-reset");
+      await observe("other-room-message", "other-room");
+      const capture = await observe("reset-request");
+      const snapshot = loadReplySessionInitializationSnapshot(scope);
+      await observe("after-reset");
+      if (stale) {
+        await upsertSessionEntryCore(scope, { ...entry, sessionId: "replacement" });
+      }
+      const result = await commitReplySessionInitialization({
+        ...scope,
+        activeSessionKey: sessionKey,
+        expectedRevision: snapshot.revision,
+        sessionEntry: entry,
+        conversationHistoryReset: capture,
+        resetBoundary: { context: "clear", reason: "new", cwd: state.workspaceDir },
+      });
+      expect(result.ok).toBe(!stale);
+      const sessionId = stale ? "replacement" : entry.sessionId;
+      for (const conversationRef of ["current-room", "other-room"]) {
+        const runId = `next-${conversationRef}`;
+        const receipt = await stageSessionPendingInput(
+          { ...scope, sessionId },
+          {
+            runId,
+            assertCurrent: () => {},
+            message: { role: "user", content: runId, timestamp: 1, idempotencyKey: runId },
+            conversationHistory: await observe(runId, conversationRef),
+          },
+        );
+        expect(receipt).toBeDefined();
+        try {
+          const content = receipt?.message.content;
+          if (typeof content !== "string") {
+            throw new Error("Expected captured text input");
+          }
+          if (conversationRef === "other-room") {
+            expect(content).toContain("other-room-message");
+            expect(content).not.toContain("after-reset");
+          } else {
+            expect(content).toContain("after-reset");
+            expect(content).toContain("reset-request");
+            expect(content.includes("before-reset")).toBe(stale);
+            expect(content).not.toContain("other-room-message");
+          }
+        } finally {
+          receipt?.finish("cancelled");
+        }
+      }
+    });
+  },
+);
 
 it("retains only declared reply rows and their stored model parent at each snapshot", async () => {
   await withOpenClawTestState({ label: "reply-row-selection" }, async (state) => {

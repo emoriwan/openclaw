@@ -5,14 +5,12 @@ import {
 } from "openclaw/plugin-sdk/channel-outbound";
 import { resolveMarkdownTableMode } from "openclaw/plugin-sdk/markdown-table-runtime";
 import { resolveChunkMode } from "openclaw/plugin-sdk/reply-chunking";
-import { createChannelHistoryWindow } from "openclaw/plugin-sdk/reply-history";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyDispatchKind, ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
 import { readLatestAssistantTextByIdentity } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { resolveDiscordMaxLinesPerMessage } from "../accounts.js";
-import { discordInboundEventDelivery } from "../inbound-event-delivery.js";
 import type { RequestClient } from "../internal/discord.js";
 import { buildDiscordMessageProcessContext } from "./message-handler.context.js";
 import { createDiscordDraftPreviewController } from "./message-handler.draft-preview.js";
@@ -79,24 +77,12 @@ export function createDiscordMessageReplyRuntime(params: {
   processContext: DiscordMessageProcessContext;
   sourceRepliesAreToolOnly: boolean;
   shouldDisableCoreTypingKeepalive: boolean;
-  isRoomEvent: boolean;
   dispatchStartedAt: number;
   feedbackRest: RequestClient;
   deliveryRest: RequestClient;
 }) {
   const { ctx, processContext } = params;
-  const {
-    cfg,
-    discordConfig,
-    accountId,
-    token,
-    guildHistories,
-    historyLimit,
-    textLimit,
-    messageChannelId,
-    isDirectMessage,
-    route,
-  } = ctx;
+  const { cfg, discordConfig, accountId, token, textLimit, messageChannelId, route } = ctx;
   const { ctxPayload, deliverTarget, replyReference } = processContext;
   const typingChannelId = deliverTarget.startsWith("channel:")
     ? deliverTarget.slice("channel:".length)
@@ -133,29 +119,6 @@ export function createDiscordMessageReplyRuntime(params: {
     accountId,
   });
   const chunkMode = resolveChunkMode(cfg, "discord", accountId);
-  const clearGroupHistory = () => {
-    if (isDirectMessage) {
-      return;
-    }
-    createChannelHistoryWindow({ historyMap: guildHistories }).clear({
-      historyKey: messageChannelId,
-      limit: historyLimit,
-    });
-  };
-  const beginDeliveryCorrelation = () =>
-    params.isRoomEvent
-      ? discordInboundEventDelivery.begin(
-          ctxPayload.SessionKey,
-          {
-            outboundTo: messageChannelId,
-            outboundAccountId: route.accountId,
-            markInboundEventDelivered: clearGroupHistory,
-          },
-          { inboundEventKind: ctxPayload.InboundEventKind },
-        )
-      : () => {};
-  const endDeliveryCorrelation = beginDeliveryCorrelation();
-
   const resolveCurrentTurnTranscriptFinalText = async (): Promise<string | undefined> => {
     const sessionKey = ctxPayload.SessionKey;
     if (!sessionKey) {
@@ -212,8 +175,6 @@ export function createDiscordMessageReplyRuntime(params: {
     tableMode,
     maxLinesPerMessage,
     chunkMode,
-    beginQueuedDeliveryCorrelation: beginDeliveryCorrelation,
-    endDeliveryCorrelation,
     resolveCurrentTurnTranscriptFinalText,
     deliverChannelId,
     draftPreview,

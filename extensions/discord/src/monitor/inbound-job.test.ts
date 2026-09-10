@@ -13,6 +13,11 @@ function jsonRoundTrip<T>(value: T): T {
 describe("buildDiscordInboundJob", () => {
   it("keeps live runtime references out of the payload", async () => {
     const ctx = await createBaseDiscordMessageContext({
+      conversationHistory: {
+        conversationRef: "conv_source_room",
+        throughSequence: 17,
+        requestSourceIds: ["m1"],
+      },
       message: {
         id: "m1",
         channelId: "thread-1",
@@ -79,6 +84,7 @@ describe("buildDiscordInboundJob", () => {
     });
     const serializedPayload = jsonRoundTrip(job.payload);
     expect(serializedPayload.preparedMedia).toEqual(ctx.preparedMedia);
+    expect(serializedPayload.conversationHistory).toEqual(ctx.conversationHistory);
     expect(serializedPayload.threadChannel).toEqual({
       id: "thread-1",
       name: "codex",

@@ -1,9 +1,11 @@
 // Discord tests cover message handler.preflight.acp bindings plugin behavior.
 import * as conversationBindingRuntime from "openclaw/plugin-sdk/conversation-binding-runtime";
+import { recordConversationObservation } from "openclaw/plugin-sdk/reply-history";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const ensureConfiguredBindingRouteReadyMock = vi.hoisted(() => vi.fn());
 const resolveConfiguredBindingRouteMock = vi.hoisted(() => vi.fn());
+vi.mock("openclaw/plugin-sdk/reply-history", { spy: true });
 
 vi.mock("openclaw/plugin-sdk/conversation-binding-runtime", async () => {
   const { createConfiguredBindingConversationRuntimeModuleMock } =
@@ -196,6 +198,22 @@ function createHydratedGuildClient(restPayload: Record<string, unknown>) {
   return { client, restGet };
 }
 
+const nativeBotReply = {
+  type: 19,
+  message_reference: { type: 0, message_id: "earlier-bot-reply", channel_id: CHANNEL_ID },
+  referenced_message: {
+    id: "earlier-bot-reply",
+    channel_id: CHANNEL_ID,
+    content: "Previous bot answer",
+    author: { id: "bot-1", username: "Bot", bot: true },
+    timestamp: "2026-09-01T12:00:00.000Z",
+    mentions: [],
+    mention_roles: [],
+    attachments: [],
+    embeds: [],
+  },
+};
+
 async function runRestHydrationPreflight(params: {
   messageId: string;
   restPayload: Record<string, unknown>;
@@ -214,6 +232,10 @@ async function runRestHydrationPreflight(params: {
   const result = await preflightDiscordMessage(
     createBasePreflightParams({
       client,
+      discordRestFetch: async () =>
+        new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+          headers: { "content-type": "image/png" },
+        }),
       data: createGuildEvent({
         channelId: CHANNEL_ID,
         guildId: GUILD_ID,
@@ -228,6 +250,7 @@ async function runRestHydrationPreflight(params: {
 
 describe("preflightDiscordMessage configured ACP bindings", () => {
   beforeEach(() => {
+    vi.mocked(recordConversationObservation).mockClear();
     sessionBindingTesting.resetSessionBindingAdaptersForTests();
     ensureConfiguredBindingRouteReadyMock.mockReset();
     resolveConfiguredBindingRouteMock.mockReset();
@@ -287,7 +310,7 @@ describe("preflightDiscordMessage configured ACP bindings", () => {
     expect(result?.route.agentId).toBe("codex");
   });
 
-  it("accepts plain messages in configured ACP-bound channels without a mention", async () => {
+  it("observes plain messages in configured ACP-bound channels without initializing a turn", async () => {
     const message = createDiscordMessage({
       id: "m-no-mention",
       channelId: CHANNEL_ID,
@@ -312,17 +335,25 @@ describe("preflightDiscordMessage configured ACP bindings", () => {
       }),
     );
 
-    expect(ensureConfiguredBindingRouteReadyMock).toHaveBeenCalledTimes(1);
-    expect(result?.boundSessionKey).toBe("agent:codex:acp:binding:discord:default:abc123");
-    expect(result?.boundAgentId).toBe("codex");
-    expect(result?.route.sessionKey).toBe("agent:codex:acp:binding:discord:default:abc123");
-    expect(result?.route.agentId).toBe("codex");
+    expect(result).toBeNull();
+    expect(ensureConfiguredBindingRouteReadyMock).not.toHaveBeenCalled();
+    expect(recordConversationObservation).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ agentId: "codex" }),
+      expect.objectContaining({
+        sourceId: "m-no-mention",
+        message: expect.objectContaining({ text: "hello" }),
+      }),
+    );
+    expect(
+      (await vi.mocked(recordConversationObservation).mock.results[0]?.value)?.throughSequence,
+    ).toBeGreaterThan(0);
   });
 
   it("hydrates empty guild message payloads from REST before ensuring configured ACP bindings", async () => {
     const { result, restGet } = await runRestHydrationPreflight({
       messageId: "m-rest",
       restPayload: {
+        ...nativeBotReply,
         id: "m-rest",
         content: "hello from rest",
         attachments: [],
@@ -347,6 +378,7 @@ describe("preflightDiscordMessage configured ACP bindings", () => {
     const { result, restGet } = await runRestHydrationPreflight({
       messageId: "m-rest-sticker",
       restPayload: {
+        ...nativeBotReply,
         id: "m-rest-sticker",
         content: "",
         attachments: [],

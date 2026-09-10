@@ -757,6 +757,31 @@ CREATE INDEX IF NOT EXISTS idx_memory_index_chunks_path
 CREATE INDEX IF NOT EXISTS idx_memory_index_chunks_source
   ON memory_index_chunks(source);
 
+CREATE TABLE IF NOT EXISTS conversation_history (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_id TEXT NOT NULL,
+  conversation_ref TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  message_json TEXT NOT NULL,
+  assigned_input_id TEXT,
+  consumed_session_id TEXT,
+  submission_started INTEGER,
+  UNIQUE (agent_id, conversation_ref, source_id),
+  FOREIGN KEY (assigned_input_id) REFERENCES session_pending_inputs(input_id) ON DELETE SET NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_conversation_history_unread
+  ON conversation_history(agent_id, conversation_ref, seq)
+  WHERE assigned_input_id IS NULL AND consumed_session_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_conversation_history_assignment
+  ON conversation_history(assigned_input_id)
+  WHERE assigned_input_id IS NOT NULL;
+
+CREATE INDEX IF NOT EXISTS idx_conversation_history_retention
+  ON conversation_history(consumed_session_id)
+  WHERE consumed_session_id IS NOT NULL;
+
 -- Accepted input stays outside the active transcript until its exact turn owns execution.
 CREATE TABLE IF NOT EXISTS session_pending_inputs (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -11,6 +11,7 @@ import {
   isCodexAppServerIndeterminateTransportError,
   type CodexAppServerClient,
 } from "./client.js";
+import { fitCodexProjectedContextForTurnStart } from "./context-engine-projection.js";
 import type { CodexUserInput } from "./protocol.js";
 
 const CODEX_STEER_ALL_DEBOUNCE_MS = 500;
@@ -27,6 +28,7 @@ export class CodexSteeringAcceptedUnconfirmedError extends Error {
 export type CodexSteeringQueueOptions = Pick<
   AgentHarnessQueueMessageOptions,
   | "debounceMs"
+  | "currentInboundContext"
   | "images"
   | "imageOrder"
   | "media"
@@ -213,6 +215,12 @@ export function createCodexSteeringQueue(params: {
         return;
       }
       if (params.beforeSubmit) {
+        fitCodexProjectedContextForTurnStart({
+          promptText: liveItems
+            .flatMap((item) => prepared.get(item) ?? [])
+            .flatMap((input) => (input.type === "text" ? [input.text] : []))
+            .join(""),
+        });
         // Codex may consume input before replying. Commit source custody before
         // crossing that boundary, then revalidate owners after the awaited write.
         await params.beforeSubmit(liveItems);

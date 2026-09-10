@@ -23,7 +23,6 @@ describe("Telegram inbound provenance buffering", () => {
       const message = {
         promptContextBoundaryOptions: () => ({}),
         latestPromptContextMinTimestampMs: () => undefined,
-        latestPromptContextAmbientWatermark: () => undefined,
         mergeDispatchDedupeClaims: () => [],
         releaseDispatchDedupeClaims: () => undefined,
         buildFailedProcessingResult: (error: unknown) => ({ kind: "failed-retryable", error }),
@@ -38,7 +37,6 @@ describe("Telegram inbound provenance buffering", () => {
           ...ctx,
           message: syntheticMessage,
         }),
-        formatTelegramAmbientTranscriptBody: () => undefined,
         processMessageWithReplyChain,
       } as unknown as TelegramMessagePipeline;
       const { inboundDebouncer } = createTelegramInboundBuffers({

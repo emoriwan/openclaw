@@ -584,8 +584,6 @@ export function createContext(overrides?: Partial<TelegramMessageContext>): Tele
     replyThreadId: 777,
     threadSpec: { id: 777, scope: "dm" },
     historyKey: undefined,
-    historyLimit: 0,
-    groupHistories: new Map(),
     route: { agentId: "default", accountId: "default" },
     skillFilter: undefined,
     sendTyping: vi.fn(),

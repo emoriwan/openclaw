@@ -4,9 +4,13 @@ import { createQaBusState } from "./bus-state.js";
 import { createQaCrablineTransportAdapter } from "./crabline-transport.js";
 
 const NATIVE_COMMAND_CASES = [
-  { command: "stop", name: "stop" },
-  { command: "queue collect please help", name: "queue" },
-  { command: "think high", name: "think" },
+  { command: "stop", name: "stop", wire: "/stop@crabline_bot" },
+  {
+    command: "queue collect please help",
+    name: "queue",
+    wire: "/queue@crabline_bot collect please help",
+  },
+  { command: "think high", name: "think", wire: "/think@crabline_bot high" },
 ] as const;
 
 describe("Crabline Telegram native command arguments", () => {
@@ -45,15 +49,42 @@ describe("Crabline Telegram native command arguments", () => {
         if (!telegram?.apiRoot || !telegram.botToken) {
           throw new Error("Crabline Telegram API root and bot token are required");
         }
-        const response = await fetch(`${telegram.apiRoot}/bot${telegram.botToken}/getUpdates`);
-        await expect(response.json()).resolves.toMatchObject({
-          result: NATIVE_COMMAND_CASES.map(({ command, name }) => ({
-            message: {
-              entities: [{ length: name.length + 1, offset: 0, type: "bot_command" }],
-              text: `/${command}`,
-            },
-          })),
+        await expect(
+          fetch(`${telegram.apiRoot}/bot${telegram.botToken}/getMe`).then((response) =>
+            response.json(),
+          ),
+        ).resolves.toMatchObject({
+          result: { username: "crabline_bot" },
         });
+        for (const text of ["ordinary room chatter", "🙂 @openclaw explain this", "/help"]) {
+          await transport.sendInbound({
+            conversation: { id: "-10042", kind: "group" },
+            senderId: "100001",
+            text,
+          });
+        }
+        const response = await fetch(`${telegram.apiRoot}/bot${telegram.botToken}/getUpdates`);
+        const updates: unknown = await response.json();
+        expect(updates).toMatchObject({
+          result: [
+            ...NATIVE_COMMAND_CASES.map(({ wire, name }) => ({
+              message: {
+                entities: [{ length: name.length + 14, offset: 0, type: "bot_command" }],
+                text: wire,
+              },
+            })),
+            { message: { text: "ordinary room chatter" } },
+            {
+              message: {
+                text: "🙂 @crabline_bot explain this",
+                entities: [{ type: "mention", offset: 3, length: 13 }],
+              },
+            },
+            { message: { text: "/help" } },
+          ],
+        });
+        expect(updates).not.toHaveProperty("result.3.message.entities");
+        expect(updates).not.toHaveProperty("result.5.message.entities");
       } finally {
         await transport.cleanup?.();
       }

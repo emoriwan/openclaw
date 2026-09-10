@@ -1,3 +1,4 @@
+import type { Message } from "grammy/types";
 import { KeyedAsyncQueue } from "openclaw/plugin-sdk/keyed-async-queue";
 import {
   createPluginStateKeyedStoreForTests,
@@ -11,7 +12,6 @@ import {
   telegramIngestGroupForTest,
   waitForTelegramMockCalls,
   type TelegramIngestGroupForTest,
-  type TelegramMentionCaseForTest,
   type TelegramMentionPolicyForTest,
 } from "./bot.create-telegram-bot.test-support.js";
 import { setTelegramRuntime } from "./runtime.js";
@@ -76,7 +76,6 @@ const TELEGRAM_TEST_TIMINGS = {
   textFragmentGapMs: 30,
 } as const;
 const TEXT_FRAGMENT_COALESCE_TEST_GAP_MS = 5_000;
-const TELEGRAM_TEST_TOPIC = "-100456:topic:42";
 
 async function withTelegramSpooledReplayUpdate<T>(
   update: object,
@@ -134,6 +133,8 @@ function createChannelPostContext(params: {
   date: number;
   title?: string;
   caption?: string;
+  captionEntities?: Message["caption_entities"];
+  replyToMessage?: Message["reply_to_message"];
   text?: string;
   mediaGroupId?: string;
   photoFileId?: string;
@@ -146,11 +147,13 @@ function createChannelPostContext(params: {
       message_id: params.messageId,
       date: params.date,
       ...(params.caption ? { caption: params.caption } : {}),
+      ...(params.captionEntities ? { caption_entities: params.captionEntities } : {}),
+      ...(params.replyToMessage ? { reply_to_message: params.replyToMessage } : {}),
       ...(params.text ? { text: params.text } : {}),
       ...(params.mediaGroupId ? { media_group_id: params.mediaGroupId } : {}),
       ...(photoFileId ? { photo: [{ file_id: photoFileId }] } : {}),
     },
-    me: { username: "openclaw_bot" },
+    me: telegramBotInfoForTest,
     getFile: async () =>
       params.getFileResult ?? (photoFileId ? { file_path: `photos/${photoFileId}.jpg` } : {}),
   };
@@ -186,6 +189,7 @@ async function queueChannelPostAlbum(
   handler: ReturnType<typeof getChannelPostHandler>,
   params: {
     caption: string;
+    captionEntities?: Message["caption_entities"];
     mediaGroupId: string;
     firstMessageId: number;
     secondMessageId: number;
@@ -199,6 +203,7 @@ async function queueChannelPostAlbum(
       {
         messageId: params.firstMessageId,
         caption: params.caption,
+        captionEntities: params.captionEntities,
         date: 1736380800,
         photoFileId: params.firstPhotoFileId ?? "p1",
       },
@@ -245,7 +250,6 @@ function setTelegramIngestGroupConfig(
     groups?: Record<string, TelegramIngestGroupForTest>;
     groupAllowFrom?: string[];
     providerPolicy?: TelegramMentionPolicyForTest;
-    accountPolicy?: TelegramMentionPolicyForTest;
     customMentionPatterns?: boolean;
   } = {},
 ) {
@@ -259,9 +263,6 @@ function setTelegramIngestGroupConfig(
         ...(params.groupAllowFrom ? { groupAllowFrom: params.groupAllowFrom } : {}),
         ...(params.providerPolicy ? { mentionPatterns: params.providerPolicy } : {}),
         groups: params.groups ?? { "-100456": { requireMention: true, ingest: true } },
-        ...(params.accountPolicy
-          ? { accounts: { work: { mentionPatterns: params.accountPolicy } } }
-          : {}),
       },
     },
   });
@@ -450,7 +451,8 @@ describe("createTelegramBot channel_post media", () => {
     try {
       const handler = getChannelPostHandler();
       await queueChannelPostAlbum(handler, {
-        caption: "album caption",
+        caption: "@openclaw_bot album caption",
+        captionEntities: [{ type: "mention", offset: 0, length: 13 }],
         mediaGroupId: "channel-album-1",
         firstMessageId: 201,
         secondMessageId: 202,
@@ -477,7 +479,7 @@ describe("createTelegramBot channel_post media", () => {
         textFragmentGapMs: TEXT_FRAGMENT_COALESCE_TEST_GAP_MS,
       });
 
-      const part1 = "A".repeat(4050);
+      const part1 = "@openclaw_bot " + "A".repeat(4036);
       const part2 = "B".repeat(50);
 
       await handler({
@@ -486,6 +488,7 @@ describe("createTelegramBot channel_post media", () => {
           message_id: 301,
           date: 1736380800,
           text: part1,
+          entities: [{ type: "mention", offset: 0, length: 13 }],
         },
         me: { username: "openclaw_bot" },
         getFile: async () => ({}),
@@ -529,6 +532,14 @@ describe("createTelegramBot channel_post media", () => {
         messageId: 4001,
         date: 1736380800,
         photoFileId: "oversized",
+        replyToMessage: {
+          message_id: 99,
+          date: 1736380700,
+          chat: { id: -100777111222, type: "channel", title: "Wake Channel" },
+          from: telegramBotInfoForTest,
+          text: "Previous bot reply",
+          reply_to_message: undefined,
+        },
       }),
     );
 
@@ -676,7 +687,7 @@ describe("createTelegramBot channel_post media", () => {
     ["unauthorized mention-optional command", true, undefined, undefined, false],
     ["unauthorized prefixed mention-optional command", true, undefined, undefined, false],
   ] as Array<[string, boolean | undefined, boolean | undefined, boolean | undefined, boolean]>)(
-    "honors %s before skipping unmentioned group media (#92067)",
+    "retains group media while honoring %s ingestion hooks (#92067)",
     async (_name, groupIngest, wildcardIngest, topicIngest, shouldIngest) => {
       const unauthorizedCommand = _name.startsWith("unauthorized");
       const command = `${_name.includes("prefixed") ? "[Tue 2026-06-02 12:34] " : ""}${
@@ -718,10 +729,9 @@ describe("createTelegramBot channel_post media", () => {
             : undefined,
           getFile,
         });
-        const expectedCalls = Number(shouldIngest);
-        expect(getFile).toHaveBeenCalledTimes(expectedCalls);
-        expect(fetchSpy).toHaveBeenCalledTimes(expectedCalls);
-        expectTelegramIngestHook([92067], { expectedCalls });
+        expect(getFile).toHaveBeenCalledTimes(1);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        expectTelegramIngestHook([92067], { expectedCalls: Number(shouldIngest) });
         expect(sendMessageSpy).not.toHaveBeenCalled();
         expect(replySpy).not.toHaveBeenCalled();
       } finally {
@@ -784,10 +794,10 @@ describe("createTelegramBot channel_post media", () => {
           getFile,
         });
       }
-      expect(getFile).not.toHaveBeenCalled();
+      expect(getFile).toHaveBeenCalledTimes(2);
       await flushChannelPostMediaGroup(setTimeoutSpy);
-      expect(getFile).toHaveBeenCalledTimes(unauthorizedCommand ? 0 : 2);
-      expect(fetchSpy).toHaveBeenCalledTimes(unauthorizedCommand ? 0 : testCase.partial ? 1 : 2);
+      expect(getFile).toHaveBeenCalledTimes(2);
+      expect(fetchSpy).toHaveBeenCalledTimes(testCase.partial ? 1 : 2);
       const ingestedIds = testCase.partial ? testCase.messageIds.slice(1) : testCase.messageIds;
       expectTelegramIngestHook(ingestedIds, { expectedCalls: Number(!unauthorizedCommand) });
       expect(sendMessageSpy).not.toHaveBeenCalled();
@@ -798,74 +808,47 @@ describe("createTelegramBot channel_post media", () => {
     }
   });
 
-  it.each([
-    ["provider deny", { mode: "deny" }, undefined, undefined, false, 92073],
-    [
-      "conversation deny",
-      { mode: "allow", denyIn: ["-100456"] },
-      undefined,
-      undefined,
-      false,
-      92074,
-    ],
-    ["topic deny", { mode: "allow", denyIn: [TELEGRAM_TEST_TOPIC] }, undefined, 42, false, 92075],
-    ["topic allow", { mode: "deny", allowIn: [TELEGRAM_TEST_TOPIC] }, undefined, 42, true, 92076],
-    ["account deny", { mode: "allow" }, { mode: "deny" }, undefined, false, 92077],
-    [
-      "account topic allow",
-      { mode: "deny" },
-      { mode: "deny", allowIn: [TELEGRAM_TEST_TOPIC] },
-      42,
-      true,
-      92078,
-    ],
-  ] as TelegramMentionCaseForTest[])(
-    "applies %s before classifying group media mentions (#92067)",
-    async (_name, providerPolicy, accountPolicy, topicId, shouldWarn, messageId) => {
-      setTelegramIngestGroupConfig({
-        customMentionPatterns: true,
-        providerPolicy,
-        accountPolicy,
-      });
-      createTelegramBot({ token: "tok", ...(accountPolicy ? { accountId: "work" } : {}) });
-      await dispatchTelegramGroupPhoto({
-        messageId,
-        topicId,
-        caption: "bert, see attachment",
-        getFile: async () => {
-          throw new Error("Network request for 'getFile' failed!");
-        },
-      });
-      const expectedWarnings = Number(shouldWarn);
-      expect(sendMessageSpy).toHaveBeenCalledTimes(expectedWarnings);
-      expect(replySpy).toHaveBeenCalledTimes(expectedWarnings);
-      expect(sendMessageSpy.mock.calls[0]?.[1]).toEqual(
-        [undefined, "⚠️ Failed to download media. Please try again."][expectedWarnings],
-      );
-      expectTelegramIngestHook([], {
-        content: "bert, see attachment",
-        expectedCalls: Number(!shouldWarn),
-      });
-    },
-  );
+  it("observes legacy text mention matches without starting a turn (#92067)", async () => {
+    setTelegramIngestGroupConfig({
+      customMentionPatterns: true,
+      providerPolicy: { mode: "allow" },
+    });
+    createTelegramBot({ token: "tok" });
+    await dispatchTelegramGroupPhoto({
+      messageId: 92073,
+      caption: "bert, see attachment",
+      getFile: async () => {
+        throw new Error("Network request for 'getFile' failed!");
+      },
+    });
+    expect(sendMessageSpy).not.toHaveBeenCalled();
+    expect(replySpy).not.toHaveBeenCalled();
+    expectTelegramIngestHook([], {
+      content: "bert, see attachment",
+      expectedCalls: 1,
+    });
+  });
 
   it.each([
     {
       name: "a native mention",
       messageId: 81182,
       caption: "@openclaw_bot check this",
+      extraMessage: { caption_entities: [{ type: "mention", offset: 0, length: 13 }] },
       ingest: false,
     },
     {
       name: "a native mention with ingestion",
       messageId: 81186,
       caption: "@openclaw_bot check this",
+      extraMessage: { caption_entities: [{ type: "mention", offset: 0, length: 13 }] },
       ingest: true,
     },
     {
       name: "a native mention with denied patterns",
       messageId: 81185,
       caption: "@openclaw_bot check this",
+      extraMessage: { caption_entities: [{ type: "mention", offset: 0, length: 13 }] },
       ingest: true,
       denyPatterns: true,
     },
@@ -952,7 +935,12 @@ describe("createTelegramBot channel_post media", () => {
             handler({
               ...createChannelPostContext({
                 messageId,
-                ...(index === 0 ? { caption: "shutdown album" } : {}),
+                ...(index === 0
+                  ? {
+                      caption: "@openclaw_bot shutdown album",
+                      captionEntities: [{ type: "mention" as const, offset: 0, length: 13 }],
+                    }
+                  : {}),
                 date: 1736380800 + index,
                 mediaGroupId: "shutdown-album-1",
                 photoFileId: `p${index + 1}`,
@@ -995,7 +983,8 @@ describe("createTelegramBot channel_post media", () => {
         ctx: Record<string, unknown>,
       ) => Promise<void>;
       await queueChannelPostAlbum(handler, {
-        caption: "live partial album",
+        caption: "@openclaw_bot live partial album",
+        captionEntities: [{ type: "mention", offset: 0, length: 13 }],
         mediaGroupId: `live-album-${firstMessageId}`,
         firstMessageId,
         secondMessageId: firstMessageId + 1,
@@ -1035,7 +1024,8 @@ describe("createTelegramBot channel_post media", () => {
         ctx: Record<string, unknown>,
       ) => Promise<void>;
       await queueChannelPostAlbum(handler, {
-        caption: "fatal album",
+        caption: "@openclaw_bot fatal album",
+        captionEntities: [{ type: "mention", offset: 0, length: 13 }],
         mediaGroupId: "fatal-album-1",
         firstMessageId: 501,
         secondMessageId: 502,

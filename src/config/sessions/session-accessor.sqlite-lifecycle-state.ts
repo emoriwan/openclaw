@@ -10,6 +10,7 @@ import {
   type OpenClawAgentDatabase,
   type OpenClawAgentDatabaseOptions,
 } from "../../state/openclaw-agent-db.js";
+import { pruneConsumedConversationHistory } from "./conversation-history.js";
 import { persistSessionTranscriptArchive } from "./session-accessor.sqlite-archive-store.js";
 import type {
   MaterializedSessionStateDeletePlan,
@@ -213,7 +214,16 @@ export function deleteMaterializedSessionStatePlans(
     if (plan.archive) {
       persistSessionTranscriptArchive(database, plan);
     }
-    if (deleteSqliteSessionStateRows(database, plan.sessionId)) {
+    // FTS is virtual, so remove its projection before the window's cascading delete.
+    deleteSessionTranscriptIndexInTransaction(database.db, plan.sessionId);
+    const deleted = executeSqliteQuerySync(
+      database.db,
+      getSessionKysely(database.db)
+        .deleteFrom("session_windows")
+        .where("session_id", "=", plan.sessionId),
+    );
+    pruneConsumedConversationHistory(database, plan.sessionId);
+    if (Number(deleted.numAffectedRows ?? 0n) > 0) {
       onDeleted?.();
     }
     if (plan.snapshot.lastSeq !== null && plan.archivedTranscript) {
@@ -361,15 +371,15 @@ export async function projectSessionEntryLifecycleMutation(
       if (!entry) {
         continue;
       }
-      const cloned = cloneSessionEntry(entry);
-      store[sessionKey] = cloned;
+      store[sessionKey] = cloneSessionEntry(entry);
       changedSessionKeys.add(sessionKey);
       upsertedEntries.push({
         expectedEntry,
         sessionKey,
-        entry: cloned,
+        entry: store[sessionKey],
         ...(upsert.routeContext !== undefined ? { routeContext: upsert.routeContext } : {}),
         ...(upsert.resetBoundary ? { resetBoundary: upsert.resetBoundary } : {}),
+        conversationHistoryReset: upsert.conversationHistoryReset,
       });
     }
     if (projectedRemovals.length === 0) {
@@ -448,18 +458,6 @@ export function collectProjectedReferencedSessionIds(params: {
 }
 
 export { collectSessionStateIdsForEntry };
-
-function deleteSqliteSessionStateRows(database: OpenClawAgentDatabase, sessionId: string): boolean {
-  const db = getSessionKysely(database.db);
-  // The window row cascades canonical transcript tables, but FTS is virtual;
-  // clear its projection before dropping the owner row.
-  deleteSessionTranscriptIndexInTransaction(database.db, sessionId);
-  const deleted = executeSqliteQuerySync(
-    database.db,
-    db.deleteFrom("session_windows").where("session_id", "=", sessionId),
-  );
-  return Number(deleted.numAffectedRows ?? 0n) > 0;
-}
 
 export function deletePlannedLifecycleArtifactEntries(
   database: OpenClawAgentDatabase,

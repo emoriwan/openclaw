@@ -17,6 +17,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { isTelegramForumServiceMessage } from "../forum-service-message.js";
 import { renderTelegramTextEntities } from "./inbound-text-entities.js";
 
 type TelegramMediaMessage = Pick<
@@ -371,6 +372,34 @@ export function hasBotMention(msg: Message, botUsername: string, botId?: number)
   return false;
 }
 
+/** Native addressing is separate from name matching and ambient activation settings. */
+export function resolveTelegramMessageAddress(
+  msg: Message,
+  bot: { id?: number; username?: string },
+): "mention" | "reply" | undefined {
+  const replyToBot =
+    bot.id !== undefined &&
+    msg.reply_to_message?.from?.id === bot.id &&
+    !msg.reply_to_message.sender_chat &&
+    !isTelegramForumServiceMessage(msg.reply_to_message);
+  const { text, entities } = getTelegramTextParts(msg);
+  const mention = bot.username ? `@${bot.username.toLowerCase()}` : undefined;
+  const mentionOfBot = entities.some((entity) => {
+    if (entity.type === "text_mention") {
+      return bot.id !== undefined && entity.user.id === bot.id;
+    }
+    const value = text.slice(entity.offset, entity.offset + entity.length).toLowerCase();
+    return Boolean(
+      mention &&
+      ((entity.type === "mention" && value === mention) ||
+        (entity.type === "bot_command" &&
+          entity.offset === 0 &&
+          isBotCommandAddressedToMention(value, mention))),
+    );
+  });
+  return mentionOfBot ? "mention" : replyToBot ? "reply" : undefined;
+}
+
 export function hasLeadingBotCommandAddressedToOtherBot(
   msg: Message,
   botUsername: string,
@@ -389,13 +418,6 @@ export function hasLeadingBotCommandAddressedToOtherBot(
   const command = text.slice(0, leadingCommand.length);
   const target = command.match(/^\/[^@\s]+@([a-z0-9_]+)$/iu)?.[1];
   return Boolean(target && target.toLowerCase() !== normalizedBotUsername);
-}
-
-export function hasBotMentionInText(text: string, botUsername: string): boolean {
-  return hasStandaloneTelegramMention(
-    normalizeLowercaseStringOrEmpty(text),
-    normalizeLowercaseStringOrEmpty(`@${botUsername}`),
-  );
 }
 
 export type TelegramForwardedContext = {

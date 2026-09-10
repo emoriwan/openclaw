@@ -91,7 +91,7 @@ export function appendTranscriptMessageInTransaction<TMessage>(
       ) {
         throw new Error("Pending input is no longer active in its admitted transcript");
       }
-      consumeSessionPendingInput(database, pending);
+      consumeSessionPendingInput(database, pending, resolved.sessionId);
     }
     return {
       appended: false as const,
@@ -200,7 +200,7 @@ export function appendTranscriptMessageInTransaction<TMessage>(
     if (pending.stageRelocation) {
       pending.stageRelocation(messageId);
     } else {
-      consumeSessionPendingInput(database, pending);
+      consumeSessionPendingInput(database, pending, resolved.sessionId);
     }
   }
   return {

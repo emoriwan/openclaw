@@ -22,6 +22,7 @@ import type {
   EmbeddedAgentQueueMessageOptions,
   EmbeddedAgentQueueMessageResult,
 } from "../run-state.js";
+import { buildCurrentInboundPrompt } from "./runtime-context-prompt.js";
 
 /**
  * Minimal active-session surface needed to steer a running attempt and observe
@@ -360,7 +361,7 @@ export async function steerActiveSessionWithOptionalDeliveryWait(
     try {
       await steerActiveSession(
         activeSession,
-        text,
+        buildCurrentInboundPrompt({ prompt: text, context: options?.currentInboundContext }),
         options?.images,
         options?.userTurnTranscriptRecorder,
         options?.media,
@@ -378,7 +379,7 @@ export async function steerActiveSessionWithOptionalDeliveryWait(
   try {
     await steerAndWaitForTranscriptCommit(
       activeSession,
-      text,
+      buildCurrentInboundPrompt({ prompt: text, context: options.currentInboundContext }),
       options.deliveryTimeoutMs ?? DEFAULT_QUEUE_TRANSCRIPT_COMMIT_TIMEOUT_MS,
       options.userTurnTranscriptRecorder,
       options.images,

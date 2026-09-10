@@ -1,3 +1,4 @@
+import type { GroupActivationMode } from "../../auto-reply/group-activation.js";
 /**
  * Channel plugin adapter type contracts.
  *
@@ -423,6 +424,8 @@ export type ChannelElevatedAdapter = {
 };
 
 export type ChannelCommandAdapter = {
+  /** The first supported mode replaces obsolete session settings in status output. */
+  groupActivationModes?: readonly [GroupActivationMode, ...GroupActivationMode[]];
   enforceOwnerForCommands?: boolean;
   skipWhenConfigEmpty?: boolean;
   nativeCommandsAutoEnabled?: boolean;

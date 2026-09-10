@@ -11,7 +11,6 @@ type DiscordInboundJobRuntimeField =
   | "runtime"
   | "buildContext"
   | "abortSignal"
-  | "guildHistories"
   | "client"
   | "turnAdoptionLifecycle"
   | "threadBindings"
@@ -39,7 +38,6 @@ export function buildDiscordInboundJob(
     runtime,
     buildContext,
     abortSignal,
-    guildHistories,
     client,
     turnAdoptionLifecycle,
     threadBindings,
@@ -65,7 +63,6 @@ export function buildDiscordInboundJob(
       runtime,
       buildContext,
       abortSignal,
-      guildHistories,
       client,
       turnAdoptionLifecycle,
       threadBindings,

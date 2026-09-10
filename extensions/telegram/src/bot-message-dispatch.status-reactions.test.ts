@@ -1,4 +1,5 @@
 import { expect, it, vi } from "vitest";
+import { createContextPayload } from "./bot-message-dispatch.context-test-support.js";
 import {
   describeTelegramDispatch,
   createContext,
@@ -8,19 +9,14 @@ import {
   dispatchWithContext,
   requireInvocationOrder,
 } from "./bot-message-dispatch.test-harness.js";
-import type { TelegramMessageContext } from "./bot-message-dispatch.test-harness.js";
 
 describeTelegramDispatch("dispatchTelegramMessage status-reactions", () => {
   it("does not send visible error fallbacks for room events", async () => {
-    const historyKey = "telegram:group:-100123";
-    const groupHistories = new Map([
-      [historyKey, [{ sender: "Alice", body: "quiet failure", timestamp: 1 }]],
-    ]);
     dispatchReplyWithBufferedBlockDispatcher.mockRejectedValue(new Error("provider down"));
 
     await dispatchWithContext({
       context: createContext({
-        ctxPayload: {
+        ctxPayload: createContextPayload("ambient failure", {
           InboundEventKind: "room_event",
           SessionKey: "agent:main:telegram:group:-100123",
           ChatType: "group",
@@ -28,23 +24,23 @@ describeTelegramDispatch("dispatchTelegramMessage status-reactions", () => {
           RawBody: "ambient failure",
           BodyForAgent: "ambient failure",
           CommandBody: "ambient failure",
-        } as unknown as TelegramMessageContext["ctxPayload"],
+          CommandAuthorized: false,
+          From: "telegram:group:-100123",
+          To: "telegram:-100123",
+        }),
         msg: {
-          chat: { id: -100123, type: "supergroup" },
+          chat: { id: -100123, type: "supergroup", title: "Room" },
           message_id: 101,
-        } as unknown as TelegramMessageContext["msg"],
+          date: 1_700_000_000,
+        },
         chatId: -100123,
         isGroup: true,
-        historyKey,
-        historyLimit: 10,
-        groupHistories,
         threadSpec: { id: undefined, scope: "none" },
       }),
       streamMode: "partial",
     });
 
     expect(deliverReplies).not.toHaveBeenCalled();
-    expect(groupHistories.get(historyKey)).toHaveLength(1);
   });
 
   it("shows compacting reaction during auto-compaction and resumes thinking", async () => {

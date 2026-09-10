@@ -15,6 +15,28 @@ title: "Database layout"
 
 The task registry uses the global control-plane database. Runtime trajectory events live with their sessions in the per-agent database or a configured shared session SQLite store.
 
+### Observed group history
+
+Discord and Telegram record permitted group text in the per-agent
+`conversation_history` table. The table is created on first observation without
+changing the database version. Its conversation identity includes the channel,
+account, room, and thread; native source identifiers prevent duplicate records.
+
+A tag or reply captures unread text through that request. The existing pending
+input owns the capture until the transcript adopts it. Later chatter stays unread.
+Submission is recorded before steering reaches a runtime, so restart recovery
+cannot replay input whose delivery is uncertain.
+
+Unread text survives restart. An explicit `/new` clears unread observations
+through the reset request's capture boundary; later observations remain unread.
+Attachment references use the existing media store and attachment lifetime,
+including configured `attachments.ttlHours`; retaining a source record does not
+prevent its attachment from expiring. Consumed source records remain
+while their session has a live transcript or retained archive; transcript cleanup
+removes them when both are gone. Older builds ignore this table and do not record
+new observations. Reopening a current build prunes consumed records whose
+transcripts were removed by an older build.
+
 ### Plugin state listing index
 
 Plugin keyed stores use the shared `plugin_state_entries` table. Its listing

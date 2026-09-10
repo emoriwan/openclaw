@@ -81,6 +81,10 @@ export async function prepareCodexAttemptPrompt(context: CodexAttemptContext) {
     sandbox,
   } = connection;
   const { toolBridge } = attemptTools;
+  // The unread input is current context, so history projection cannot clip it to fit.
+  fitCodexProjectedContextForTurnStart({
+    promptText: prependCurrentInboundContext(params.prompt, params.currentInboundContext),
+  });
   let contextImages: ImageContent[] = [];
   const currentUserTurnIdempotencyKey = params.userTurnTranscriptRecorder?.message?.idempotencyKey;
   const assertProjectionCurrent = () => {
@@ -364,6 +368,7 @@ export async function prepareCodexAttemptPrompt(context: CodexAttemptContext) {
       contextRange: projectedRanges?.contextRange,
       requestRange: projectedRanges?.requestRange,
       preservedRange,
+      preserveBeforeContext: params.currentInboundContext !== undefined,
     });
   };
   const firstPromptBuild = await buildPromptFromCurrentInputs();

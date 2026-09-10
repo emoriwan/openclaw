@@ -43,6 +43,7 @@ import type {
   QaBusMessage,
   QaBusOutboundMessageInput,
 } from "./runtime-api.js";
+import { renderTelegramQaInbound } from "./telegram-inbound.js";
 
 type QaCrablineTransportState = QaTransportState & {
   cleanup: () => Promise<void>;
@@ -206,6 +207,7 @@ async function postCrablineInbound(params: {
 function createCrablineState(params: {
   adapter: StartedOpenClawCrablineAdapter;
   state: QaBusState;
+  telegramBotUsername?: string;
 }): QaCrablineTransportState {
   const baseState = params.state;
   const targetByProviderTarget = new Map<string, string>();
@@ -259,9 +261,18 @@ function createCrablineState(params: {
       }
     },
     async addInboundMessage(input: QaBusInboundMessageInput) {
+      const telegram = params.telegramBotUsername
+        ? renderTelegramQaInbound(input, params.telegramBotUsername)
+        : undefined;
       const providerInbound = params.adapter.createInbound({
-        input: createCrablineProviderInboundInput(params.adapter, input),
+        input: createCrablineProviderInboundInput(
+          params.adapter,
+          telegram ? { ...input, text: telegram.text } : input,
+        ),
       });
+      if (telegram) {
+        providerInbound.providerBody.entities = telegram.entities;
+      }
       // Provider targets carry typed thread identity. Synthetic channels and Matrix's
       // provider-native room ids still need their scenario-owned logical target restored.
       targetByProviderTarget.set(
@@ -449,9 +460,26 @@ export async function createQaCrablineTransportAdapter(params: {
     recorderPath,
   });
 
+  let telegramBotUsername: string | undefined;
+  if (adapter.channel === "telegram") {
+    try {
+      const probe = await adapter.probe();
+      telegramBotUsername =
+        isRecord(probe) && isRecord(probe.result)
+          ? readStringValue(probe.result.username)
+          : undefined;
+      if (!telegramBotUsername) {
+        throw new Error("Crabline Telegram getMe did not return a bot username");
+      }
+    } catch (error) {
+      await adapter.close();
+      throw error;
+    }
+  }
   const state = createCrablineState({
     adapter,
     state: params.state ?? createQaBusState(),
+    telegramBotUsername,
   });
   observeEvent = state.observeEvent;
   return new QaCrablineTransport({

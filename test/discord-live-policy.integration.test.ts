@@ -24,9 +24,9 @@ import {
   getActiveGatewayRootWorkCount,
   tryBeginGatewayRootWorkAdmission,
 } from "../src/process/gateway-work-admission.js";
-import { closeOpenClawStateDatabaseForTest } from "../src/state/openclaw-state-db.js";
 import { loadBundledPluginFacade } from "../src/test-utils/bundled-plugin-public-surface.js";
 import { createTestRegistry } from "../src/test-utils/channel-plugins.js";
+import { cleanupSessionStateForTest } from "../src/test-utils/session-state-cleanup.js";
 import { createTempDirTracker } from "./helpers/temp-dir.js";
 
 const tempDirs = createTempDirTracker();
@@ -41,10 +41,12 @@ beforeEach(() => {
   vi.stubEnv("OPENCLAW_SKIP_PROVIDERS", undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const stateDir of tempDirs.dirs) {
+    await cleanupSessionStateForTest({ stateDir });
+  }
   clearRuntimeConfigSnapshot();
   restoreActivePluginRegistrySnapshot(registrySnapshot);
-  closeOpenClawStateDatabaseForTest();
   vi.unstubAllEnvs();
   tempDirs.cleanup();
 });
@@ -100,7 +102,7 @@ describe("Discord admission through Gateway policy publication", () => {
       message: {
         ...raw,
         channelId,
-        mentionedUsers: [],
+        mentionedUsers: raw.mentions,
         mentionedRoles: [],
         mentionedEveryone: false,
       },
@@ -159,7 +161,7 @@ describe("Discord admission through Gateway policy publication", () => {
     const createRawMessage = (id: string) => ({
       id,
       channel_id: channelId,
-      content: "hello",
+      content: "<@999> hello",
       author: {
         id: userId,
         username: "synthetic",
@@ -169,7 +171,7 @@ describe("Discord admission through Gateway policy publication", () => {
       },
       attachments: [],
       embeds: [],
-      mentions: [],
+      mentions: [{ id: "999" }],
       mention_roles: [],
       components: [],
       mention_everyone: false,
@@ -245,7 +247,7 @@ describe("Discord admission through Gateway policy publication", () => {
           discord: {
             ...cfg.channels?.discord,
             guilds: {
-              [guildId]: { users: [userId], requireMention: false },
+              [guildId]: { users: [userId] },
             },
           },
         },

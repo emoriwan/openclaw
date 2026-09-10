@@ -12,6 +12,7 @@ import {
 } from "../../infra/system-events.js";
 import { MESSAGE_TOOL_ONLY_DELIVERY_HINT } from "../../plugin-sdk/message-tool-delivery-hints.js";
 import { beginSessionWorkAdmission } from "../../sessions/session-lifecycle-admission.js";
+import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { normalizeSessionDeliveryState } from "../../utils/delivery-context.shared.js";
 import { hasControlCommand } from "../command-detection.js";
 import { runReplyAgent } from "./agent-runner.runtime.js";
@@ -31,6 +32,8 @@ import {
   resolveInboundUserContextPromptJoiner,
 } from "./inbound-meta.js";
 import { prepareReplyConversation } from "./prompt-session-context.js";
+import { enqueueFollowupRun, scheduleFollowupDrain, type FollowupRun } from "./queue.js";
+import { clearFollowupQueue, getExistingFollowupQueue } from "./queue/state.js";
 import { REPLY_RUN_IDLE_SETTLE_TIMEOUT_MS, createReplyOperation } from "./reply-run-registry.js";
 import { getActiveReplyRunCount } from "./reply-run-registry.registry.js";
 import { testing as replyRunTesting } from "./reply-run-registry.test-support.js";
@@ -944,6 +947,83 @@ describe("runPreparedReply media-only handling", () => {
     const call = requireLastRunReplyAgentCall();
     expect(call?.followupRun.run.allowEmptyAssistantReplyAsSilent).toBe(false);
   });
+
+  it.each([
+    ["telegram", "old"],
+    ["telegram", "summarize"],
+    ["telegram", "new"],
+    ["discord", "old"],
+    ["discord", "summarize"],
+    ["discord", "new"],
+  ] as const)(
+    "collects admitted %s history without evicting it under drop:%s",
+    async (channel, dropPolicy) => {
+      const key = `observed-collect-${channel}-${dropPolicy}`;
+      const settings = { mode: "collect" as const, debounceMs: 0, cap: 2, dropPolicy };
+      const finishes: ReturnType<typeof vi.fn>[] = [];
+      const accepted: boolean[] = [];
+      const texts = ["Dinner is at Juniper Hall", "Bring dessert", "Bring drinks"];
+      try {
+        for (const [index, text] of texts.entries()) {
+          const messageId = `dinner-${index}`;
+          const message = { role: "user" as const, content: text, timestamp: 1 };
+          const recorder = createUserTurnTranscriptRecorder({ message, target: () => undefined });
+          recorder.stageApproved = async () => true;
+          recorder.getPendingInputMessage = () => message;
+          const finish = vi.fn();
+          recorder.finishPendingInput = finish;
+          finishes.push(finish);
+          vi.mocked(runReplyAgent).mockImplementationOnce(async (call) => {
+            expect(call.commandBody).toBe(text);
+            expect(call.transcriptCommandBody).toBe(text);
+            accepted.push(enqueueFollowupRun(key, call.followupRun, settings));
+            return undefined;
+          });
+          await runPrepared({
+            sessionKey: key,
+            sessionEntry: { sessionId: key, updatedAt: 1 },
+            ctx: {
+              ...createInboundTurn("summarize dinner", channel, "group"),
+              OriginatingTo: "room-42",
+              MessageSid: messageId,
+              ReplyToMode: "off",
+              ReplyToId: `reply-${index}`,
+              ConversationHistory: {
+                owner: { agentId: "default", databasePath: "/tmp/observed-collect.sqlite" },
+                conversationRef: "conv_dinner",
+                throughSequence: index + 1,
+                requestSourceIds: [messageId],
+              },
+            },
+            sessionCtx: {
+              ...createSessionTurn("summarize dinner", channel, "group"),
+              OriginatingTo: "room-42",
+              MessageSid: messageId,
+              ReplyToMode: "off",
+              ReplyToId: `reply-${index}`,
+            },
+            opts: { userTurnTranscriptRecorder: recorder },
+          });
+        }
+        expect(accepted).toEqual([true, true, false]);
+        expect(finishes[0]).not.toHaveBeenCalled();
+        expect(finishes[1]).not.toHaveBeenCalled();
+        expect(finishes[2]).toHaveBeenCalledExactlyOnceWith("cancelled");
+        const calls: FollowupRun[] = [];
+        scheduleFollowupDrain(key, async (run) => {
+          calls.push(run);
+        });
+        await vi.waitFor(() => expect(getExistingFollowupQueue(key)).toBeUndefined());
+        expect(calls).toHaveLength(1);
+        expect(calls[0]?.prompt).toBe(
+          "[Queued messages while agent was busy]\n\n---\nQueued #1\nDinner is at Juniper Hall\n\n---\nQueued #2\nBring dessert",
+        );
+        expect(calls[0]?.transcriptPrompt).toBe(calls[0]?.prompt);
+      } finally {
+        clearFollowupQueue(key);
+      }
+    },
+  );
 
   it("passes message-tool-only delivery into direct chat prompt context", async () => {
     await runPrepared({

@@ -65,6 +65,38 @@ fences are unrelated to this rule. Stable outbound message IDs use the shared
 outbound-echo registry from `openclaw/plugin-sdk/channel-outbound` instead of a
 channel-local TTL cache.
 
+### Observed conversation text
+
+`recordConversationObservation` from `openclaw/plugin-sdk/reply-history` stores
+permitted room text without starting a turn. Record in native receive order,
+after room access checks and before sender-specific buffering. Build the
+conversation identity from the source room and thread, including when a reply
+will create a different delivery thread.
+
+Pass the returned capture as `MsgContext.ConversationHistory` only when an
+addressed request enters reply dispatch. Preserve its store owner and sequence;
+assembled requests carry the source IDs of their constituent messages. Core
+captures unread text, stages it with the existing pending input, and consumes it
+when the transcript adopts the request. Messages after the capture stay unread.
+An explicit `/new` clears unread observations through that request's capture
+boundary; later observations remain unread.
+Observation does not grant invocation permission, and current context-visibility
+policy still controls which speakers supply background text.
+
+Discord and Telegram use this path for group text and background attachment
+references. Save permitted attachments through the existing media store before
+releasing buffered input. Receipt does not run a model; retained references let
+the agent inspect attachments later. Existing attachment lifetime rules apply,
+including `attachments.ttlHours`; expired files produce an explicit unavailable
+result when inspected. This API does not provide platform backfill. Other
+plugins retain their existing history behavior.
+
+Channels that require addressed group input declare
+`commands.groupActivationModes: ["mention"]`. Core uses this capability for
+activation commands and status. Omitting it preserves support for both
+`mention` and `always`; a saved unsupported mode displays the first declared
+mode. This is plugin metadata, not an operator setting.
+
 ### Transport classes and retention
 
 Classify a transport by the recovery guarantee at its receive boundary:

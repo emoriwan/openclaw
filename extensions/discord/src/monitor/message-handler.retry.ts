@@ -38,21 +38,3 @@ export async function completeDiscordSessionConflict(
     );
   }
 }
-
-export function removeDiscordReplayHistoryEntry<T extends { messageId?: string }>(
-  historyMap: Map<string, T[]>,
-  historyKey: string,
-  messageId: string,
-): void {
-  const history = historyMap.get(historyKey);
-  if (!history) {
-    return;
-  }
-  // An exhausted dispatch can release its replay claim after pending history
-  // was recorded. Remove that copy before rebuilding the same inbound turn.
-  for (let index = history.length - 1; index >= 0; index -= 1) {
-    if (history[index]?.messageId === messageId) {
-      history.splice(index, 1);
-    }
-  }
-}

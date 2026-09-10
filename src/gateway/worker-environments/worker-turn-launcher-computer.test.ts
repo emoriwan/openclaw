@@ -390,7 +390,7 @@ describe("worker launch capabilities", () => {
       const runLocal = vi.fn(() =>
         withWorkerCompactionAdoption("run-remote-exec", async (adopt) => {
           order.push("local");
-          expect(inputTurn.prompt).toContain(`${originalPrompt}\n\nCurrent attachment originals`);
+          expect(inputTurn.prompt).toContain(`${originalPrompt}\n\nAttachment originals`);
           expect(inputTurn.transcriptPrompt).toBe("Canonical transcript request");
           const placementBefore = placements.get(SESSION_ID);
           const entryBefore = loadSessionEntry(sessionTarget);

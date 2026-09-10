@@ -21,6 +21,7 @@ import { claimSessionPendingInputDedupeRecovery } from "../../config/sessions/se
 import { logVerbose } from "../../globals.js";
 import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { toPluginConversationBinding } from "../../plugins/conversation-binding.js";
+import { parseAgentSessionKey } from "../../routing/session-key.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { resolveSilentReplyPolicyFromPolicies } from "../../shared/silent-reply-policy.js";
 import { sessionDeliveryChannel } from "../../utils/delivery-context.shared.js";
@@ -105,9 +106,13 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
       })
     : null;
   const pluginOwnedBinding = toPluginConversationBinding(pluginOwnedBindingRecord);
-  const pluginBindingSessionKey = normalizeOptionalString(
-    pluginOwnedBindingRecord?.targetSessionKey,
-  );
+  const pluginBindingTarget = normalizeOptionalString(pluginOwnedBindingRecord?.targetSessionKey);
+  // Native binding handles route plugin work; only explicit agent targets own another transcript.
+  const pluginBindingSessionKey = !pluginOwnedBinding
+    ? undefined
+    : pluginBindingTarget && parseAgentSessionKey(pluginBindingTarget)
+      ? pluginBindingTarget
+      : sessionStoreEntry.sessionKey;
   const persistPluginBindingUserTurn = async (): Promise<
     PluginBindingTranscriptOwner | undefined
   > => {
@@ -423,7 +428,7 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
 
   const inboundDedupeClaim = claimInboundDedupe(ctx, {
     reclaimPendingInput: () => {
-      const sourceRunId = normalizeOptionalString(ctx.MessageSid);
+      const sourceRunId = durableSourceTurnId ?? normalizeOptionalString(ctx.MessageSid);
       return Boolean(
         params.replyOptions?.userTurnTranscriptRecorder?.getPendingInputMessage?.() &&
         !params.replyOptions.userTurnTranscriptRecorder.hasPersisted() &&
@@ -558,6 +563,7 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
   const nextState = extendPreparedDispatchState(state, {
     sendBindingNotice,
     pluginOwnedBinding,
+    pluginBindingSessionKey,
     persistPluginBindingUserTurn,
     sendPolicy,
     chatType,

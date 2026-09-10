@@ -440,7 +440,7 @@ async function executeAgentTurnInternalLoop(
         kind: "final",
         resolved: { provider: fallbackProvider, model: fallbackModel },
         payload: markAgentRunFailureReplyPayload({
-          text: "⚠️ Context overflow — this conversation is too large for the model. Use /new to start a fresh session.",
+          text: "⚠️ Context overflow — this conversation is too large for the model. Use /new to start a fresh session; in a group, send it as a reply to this message.",
         }),
         postCompactionModelFailure: fallbackCycleState.postCompactionModelAttempted || undefined,
       };

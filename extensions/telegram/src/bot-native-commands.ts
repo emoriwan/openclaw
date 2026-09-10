@@ -30,6 +30,7 @@ import {
 } from "./bot-native-command-menu.js";
 import type { TelegramUpdateKeyContext } from "./bot-updates.js";
 import type { TelegramBotOptions } from "./bot.types.js";
+import { resolveTelegramMessageAddress } from "./bot/body-helpers.js";
 import {
   normalizeTelegramCommandName,
   resolveTelegramCustomCommands,
@@ -269,7 +270,14 @@ export const registerTelegramNativeCommands = ({
       });
     };
     if (nativeEnabled) {
-      bot.command(normalizedCommandName, async (ctx) => {
+      bot.command(normalizedCommandName, async (ctx, next) => {
+        if (
+          ctx.message?.chat.type !== "private" &&
+          ctx.message &&
+          !resolveTelegramMessageAddress(ctx.message, ctx.me)
+        ) {
+          return next();
+        }
         if (shouldSkipUpdate(ctx) || !ctx.message) {
           return;
         }
@@ -289,7 +297,14 @@ export const registerTelegramNativeCommands = ({
   }
 
   for (const pluginCommand of pluginCatalog.selectedCommands) {
-    bot.command(pluginCommand.command, async (ctx: TelegramNativeCommandContext) => {
+    bot.command(pluginCommand.command, async (ctx: TelegramNativeCommandContext, next) => {
+      if (
+        ctx.message?.chat.type !== "private" &&
+        ctx.message &&
+        !resolveTelegramMessageAddress(ctx.message, ctx.me)
+      ) {
+        return next();
+      }
       if (shouldSkipUpdate(ctx) || !ctx.message) {
         return;
       }

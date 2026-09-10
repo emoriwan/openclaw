@@ -1066,6 +1066,9 @@ async function initSessionStateAttemptLocked(
   let previousSessionMemory: SessionMemoryTranscript | undefined;
   let previousSessionResetMessages: unknown[] | undefined;
   const committed = await commitReplySessionInitialization({
+    ...(resetTriggered && ctx.ConversationHistory
+      ? { conversationHistoryReset: ctx.ConversationHistory }
+      : {}),
     commitGuard: !entry
       ? () => {
           params.signal?.throwIfAborted();

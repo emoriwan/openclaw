@@ -10,6 +10,7 @@ import {
   type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
 import { ensureSessionTranscriptArchiveSchema } from "../../state/openclaw-agent-session-transcript-archive-schema.js";
+import { pruneConsumedConversationHistory } from "./conversation-history.js";
 import {
   resolveRegisteredSqliteTranscriptArchiveName,
   runSqliteTranscriptArchivePublishWorker,
@@ -362,6 +363,7 @@ export async function prunePublishedSessionArchivesByRetention(params: {
               .where("published_at", "=", row.published_at),
           );
           removed += Number(result.numAffectedRows ?? 0n);
+          pruneConsumedConversationHistory(transactionDb, row.session_id);
         }
       }, toDatabaseOptions(params.scope));
       return removed;

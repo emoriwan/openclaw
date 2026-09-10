@@ -168,9 +168,11 @@ export async function handleAgentExecutionError(params: {
       },
     );
     const text = resolveExternalRunFailureTextForConversation({
-      text: params.shouldSurfaceToControlUi
-        ? renderControlUiAgentFailureCopy(message)
-        : externalReply.text,
+      text:
+        err.userMessage ??
+        (params.shouldSurfaceToControlUi
+          ? renderControlUiAgentFailureCopy(message)
+          : externalReply.text),
       visibleReplyDelivered: await turn.resolveVisibleReplyDelivery?.(),
       sessionCtx: turn.sessionCtx,
       isGenericRunnerFailure: externalReply.isGenericRunnerFailure,
@@ -216,6 +218,13 @@ export async function handleAgentExecutionError(params: {
       kind: "final",
       payload: markAgentRunFailureReplyPayload({ text: buildRestartLifecycleReplyText() }),
     };
+  }
+  if (turn.followupRun.observedInput && (isContextOverflow || isCompactionFailure)) {
+    return await settleFailure({
+      text:
+        "The model could not process this request with the unread conversation. " +
+        "Use /new to start fresh without unread conversation; in a group, send it as a reply to this message. Then send a shorter request.",
+    });
   }
   if (isCompactionFailure) {
     takePendingLifecycleTerminal().emit("error", err);

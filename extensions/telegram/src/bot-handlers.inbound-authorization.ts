@@ -390,6 +390,7 @@ export function createTelegramHandlerAuthorization({
 
     if (
       shouldSkipGroupMessage({
+        enforceSenderAuthorization: false,
         isGroup: params.isGroup,
         chatId: params.chatId,
         chatTitle: params.msg.chat.title,
@@ -509,6 +510,7 @@ type TelegramInboundGate =
 
 function shouldSkipTelegramGroupMessage(
   params: {
+    enforceSenderAuthorization?: boolean;
     isGroup: boolean;
     chatId: string | number;
     chatTitle?: string;
@@ -546,7 +548,7 @@ function shouldSkipTelegramGroupMessage(
     effectiveGroupAllow,
     senderId,
     senderUsername,
-    enforceAllowOverride: true,
+    enforceAllowOverride: params.enforceSenderAuthorization !== false,
     requireSenderForAllowOverride: true,
   });
   if (!baseAccess.allowed) {
@@ -578,7 +580,7 @@ function shouldSkipTelegramGroupMessage(
     senderUsername,
     resolveGroupPolicy: runtime.resolveGroupPolicy,
     enforcePolicy: true,
-    enforceAllowlistAuthorization: true,
+    enforceAllowlistAuthorization: params.enforceSenderAuthorization !== false,
     allowEmptyAllowlistEntries: false,
     requireSenderForAllowlistAuthorization: true,
     checkChatAllowlist: true,

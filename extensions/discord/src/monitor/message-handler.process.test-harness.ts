@@ -303,7 +303,6 @@ let createDiscordDirectMessageContextOverrides: typeof import("./message-handler
 export let createThreadBindingManager: typeof import("./thread-bindings.js").createThreadBindingManager;
 let processDiscordMessage: typeof import("./message-handler.process.js").processDiscordMessage;
 export let formatDiscordReplySkip: typeof import("./message-handler.process.js").formatDiscordReplySkip;
-export let discordInboundEventDelivery: typeof import("../inbound-event-delivery.js").discordInboundEventDelivery;
 
 vi.mock("openclaw/plugin-sdk/reply-runtime", () => ({
   dispatchReplyWithBufferedBlockDispatcher: async (params: {
@@ -598,7 +597,6 @@ export function registerDiscordProcessTestLifecycle() {
     ({ createThreadBindingManager } = await import("./thread-bindings.js"));
     ({ processDiscordMessage, formatDiscordReplySkip } =
       await import("./message-handler.process.js"));
-    ({ discordInboundEventDelivery } = await import("../inbound-event-delivery.js"));
   });
 
   beforeEach(() => {

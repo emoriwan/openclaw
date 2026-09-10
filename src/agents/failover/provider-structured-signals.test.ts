@@ -42,7 +42,7 @@ describe("provider failover hook structured signals", () => {
     },
     {
       errorMessage: "Request size exceeds model context window",
-      copy: "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+      copy: "Context overflow: prompt too large for the model. Use /new to start a fresh session; in a group, send it as a reply to this message. You can also use a model with a larger context window.",
       runtimeKind: "unclassified",
     },
     {
@@ -84,7 +84,7 @@ describe("provider failover hook structured signals", () => {
         billing: formatBillingErrorMessage("custom-route", message.model),
         rate_limit: "⚠️ API rate limit reached. Please try again later.",
         context_overflow:
-          "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+          "Context overflow: prompt too large for the model. Use /new to start a fresh session; in a group, send it as a reply to this message. You can also use a model with a larger context window.",
         model_not_found:
           "The selected model was not found by the provider. Check the model id or choose a different model.",
         format: PROVIDER_SCHEMA_REJECTION_USER_TEXT,
@@ -148,7 +148,7 @@ describe("provider failover hook structured signals", () => {
     },
     {
       errorBody: '{"error":{"message":"Request size exceeds model context window"}}',
-      copy: "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+      copy: "Context overflow: prompt too large for the model. Use /new to start a fresh session; in a group, send it as a reply to this message. You can also use a model with a larger context window.",
     },
     {
       errorBody: '{"error":{"message":"insufficient credits"}}',

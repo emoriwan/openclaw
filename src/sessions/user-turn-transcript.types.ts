@@ -1,7 +1,5 @@
 // User-turn transcript type contracts shared by runtime and queue option types.
-import type { HumanMention } from "@openclaw/gateway-protocol";
 import type { AgentMessage } from "../../packages/agent-core/src/types.js";
-import type { TranscriptSenderIdentity } from "../chat/sender-identity.js";
 import type {
   SessionTranscriptTurnMutation,
   SessionTranscriptTurnMutationResult,
@@ -13,75 +11,19 @@ import type {
 import type { TranscriptEntryAnchor } from "../config/sessions/transcript-entry-anchor.js";
 import type { TranscriptTurnAdmission } from "../config/sessions/transcript-turn-admission.js";
 import type { SessionEntry } from "../config/sessions/types.js";
-import type { MediaFactInput } from "../media/media-facts.js";
-import type { InputProvenance } from "./input-provenance.js";
+import type {
+  ConversationHistoryCapture,
+  PersistedUserTurnMessage,
+  UserTurnInput,
+} from "./user-turn-input.types.js";
+
+export type {
+  PersistedUserTurnMediaInput,
+  PersistedUserTurnMessage,
+  UserTurnInput,
+} from "./user-turn-input.types.js";
 
 type UserTurnSessionEntry = SessionEntry;
-
-export type PersistedUserTurnMediaInput = Pick<
-  MediaFactInput,
-  | "contentType"
-  | "durationMs"
-  | "fileName"
-  | "height"
-  | "hydrationSuppressed"
-  | "messageId"
-  | "path"
-  | "sizeBytes"
-  | "transcribed"
-  | "url"
-  | "width"
-> & {
-  kind?: string | null;
-  workspaceDir?: string | null;
-};
-
-export type PersistedUserTurnMessage = Extract<AgentMessage, { role: "user" }> & {
-  display?: false;
-  excludeFromContext?: true;
-  /** Private transcript correlation; never authorizes an execution. */
-  idempotencyKey?: string;
-  provenance?: InputProvenance;
-  __openclaw?: Record<string, unknown> & { humanMentions?: readonly HumanMention[] };
-};
-
-export type UserTurnInput = Pick<PersistedUserTurnMessage, "display" | "excludeFromContext"> & {
-  text?: string | null;
-  /** Explicit human selections bound to UTF-16 offsets in text. */
-  mentions?: readonly HumanMention[];
-  media?: readonly PersistedUserTurnMediaInput[] | null;
-  /** Restart-safe native image placement; model-visible prompt bytes remain separate. */
-  mediaImageLayout?: {
-    slots: readonly {
-      kind: "inline" | "offloaded";
-      factIndex?: number;
-    }[];
-    suppressedFactIndexes?: readonly number[];
-  } | null;
-  timestamp?: number;
-  idempotencyKey?: string;
-  /** Durable transcript message reference used to render and hydrate replies. */
-  replyToId?: string;
-  /** Bounded display fallback for replies whose target is outside loaded history. */
-  replyToPreview?: { text: string; senderLabel?: string | null } | null;
-  senderIsOwner?: boolean;
-  provenance?: InputProvenance;
-  /** Identity is producer-owned attribution; labels remain editable display metadata. */
-  sender?: {
-    id?: string | null;
-    name?: string | null;
-    username?: string | null;
-    identity?: TranscriptSenderIdentity;
-  } | null;
-  /** Durable transport correlation; stored privately and never rendered into model input. */
-  transport?: {
-    channel?: string;
-    conversationRef?: string;
-    messageId?: string;
-    replyToId?: string;
-    threadId?: string;
-  };
-};
 
 export type UserTurnTranscriptUpdateMode = "inline" | "none";
 
@@ -191,6 +133,7 @@ export type CreateUserTurnTranscriptRecorderParams = {
   errorContext?: string;
   onPersistenceError?: (error: unknown) => void;
   onMessagePersisted?: (message: PersistedUserTurnMessage) => void | Promise<void>;
+  conversationHistory?: ConversationHistoryCapture;
   /** Fresh original input only, after durable append and before transcript publication. */
   onOriginalInputCommitted?: (commit: UserTurnOriginalInputCommit) => void;
   expectedSessionState?: SessionTranscriptTurnExpectedState;
@@ -201,7 +144,12 @@ export type UserTurnTranscriptRecorder = {
   readonly message: PersistedUserTurnMessage | undefined;
   resolveMessage: () => Promise<PersistedUserTurnMessage | undefined>;
   /** Durable input custody leaves the active transcript unchanged until execution owns it. */
-  stageApproved?: (options: { runId: string; assertCurrent: () => void }) => Promise<boolean>;
+  stageApproved?: (options: {
+    runId: string;
+    assertCurrent: () => void;
+    conversationHistory?: ConversationHistoryCapture;
+  }) => Promise<boolean>;
+  beginSubmission?: () => { rejectSubmission: () => void };
   getPendingInputMessage?: () => PersistedUserTurnMessage | undefined;
   isPendingInputConsumed?: () => boolean;
   withPendingInput?: <T>(run: () => T) => T;

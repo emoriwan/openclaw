@@ -2,6 +2,7 @@
 
 import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it, vi } from "vitest";
+import { AgentHarnessPreflightError } from "../agents/harness/errors.js";
 import { createHookRunnerWithRegistry } from "./hooks.test-fixtures.js";
 
 const inboundClaimEvent = {
@@ -183,6 +184,52 @@ describe("inbound_claim hook runner", () => {
     );
 
     expect(result).toEqual({ status: "error", error: "boom" });
+  });
+
+  it.each([
+    { name: "one definite preflight", failures: ["preflight"], definite: true },
+    { name: "several definite preflights", failures: ["preflight", "preflight"], definite: true },
+    {
+      name: "preflight followed by uncertainty",
+      failures: ["preflight", "unknown"],
+      definite: false,
+    },
+    {
+      name: "uncertainty followed by preflight",
+      failures: ["unknown", "preflight"],
+      definite: false,
+    },
+    { name: "a matching error name without its class", failures: ["named"], definite: false },
+  ])("preserves no-submission evidence only for $name", async ({ failures, definite }) => {
+    const preflight = new AgentHarnessPreflightError("input too large", {
+      userMessage: "Nothing was sent. Use /new, then send a shorter request.",
+    });
+    const { runner } = createHookRunnerWithRegistry(
+      failures.map((failure) => ({
+        hookName: "inbound_claim",
+        handler: async () => {
+          if (failure === "preflight") {
+            throw preflight;
+          }
+          const error = new Error("submission may have started");
+          if (failure === "named") {
+            error.name = "AgentHarnessPreflightError";
+          }
+          throw error;
+        },
+      })),
+      { logger: { warn: vi.fn(), error: vi.fn() } },
+    );
+    const result = await runner.runInboundClaimForPluginOutcome(
+      "test-plugin",
+      inboundClaimEvent,
+      inboundClaimCtx,
+    );
+    expect(result.status).toBe("error");
+    if (result.status !== "error") {
+      throw new Error("Expected a failed targeted claim");
+    }
+    expect(result.preflightError).toBe(definite ? preflight : undefined);
   });
 
   it("reports targeted per-hook registration timeouts as handler errors", async () => {

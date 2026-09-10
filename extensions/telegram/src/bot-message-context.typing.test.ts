@@ -101,7 +101,8 @@ describe("buildTelegramMessageContext typing", () => {
         chat: { id: -1001234567890, type: "supergroup", title: "Forum", is_forum: true },
         from: { id: 42, first_name: "Pat" },
         message_thread_id: 99,
-        text: "hello topic",
+        text: "@bot hello topic",
+        entities: [{ type: "mention", offset: 0, length: 4 }],
       },
       resolveGroupRequireMention: () => false,
       resolveTelegramGroupConfig: () => ({
@@ -125,7 +126,7 @@ describe("buildTelegramMessageContext typing", () => {
     ).toBeLessThan(requireInvocationOrder(buildInboundContext.mock, "inbound context invocation"));
   });
 
-  it("does not send forum topic typing for room events", async () => {
+  it("does not send forum topic typing for unaddressed chatter with retired ambient settings", async () => {
     const sendChatActionHandler = createSendChatActionHandler();
 
     const ctx = await buildTelegramMessageContextForTest({
@@ -144,12 +145,11 @@ describe("buildTelegramMessageContext typing", () => {
       sendChatActionHandler,
     });
 
-    expect(ctx?.ctxPayload.InboundEventKind).toBe("room_event");
-    expect(ctx?.initialTypingCueSent).toBe(false);
+    expect(ctx).toBeNull();
     expect(sendChatActionHandler.sendChatAction).not.toHaveBeenCalled();
   });
 
-  it("binds buffered ingress in order to the final route, message, and room-event kind", async () => {
+  it("binds buffered ingress in order to the final route and addressed request", async () => {
     const resolutionOrder: string[] = [];
     const createResolver = (label: string) =>
       vi.fn<TelegramChannelIngressResolver>(async () => {
@@ -170,7 +170,8 @@ describe("buildTelegramMessageContext typing", () => {
         chat: { id: -1001234567890, type: "supergroup", title: "Forum", is_forum: true },
         from: { id: 42, first_name: "Pat" },
         message_thread_id: 99,
-        text: "ambient chatter",
+        text: "@bot use the buffered context",
+        entities: [{ type: "mention", offset: 0, length: 4 }],
       },
       options: {
         messageIdOverride: "102",
@@ -191,7 +192,7 @@ describe("buildTelegramMessageContext typing", () => {
       agentId: ctx?.route.agentId,
       sessionKey: ctx?.route.sessionKey,
       messageId: "102",
-      inboundEventKind: "room_event",
+      inboundEventKind: "user_request",
     };
     expect(resolutionOrder).toEqual(["first", "last"]);
     expect(first).toHaveBeenCalledExactlyOnceWith(expectedBinding);

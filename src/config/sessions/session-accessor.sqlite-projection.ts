@@ -9,6 +9,7 @@ import {
   openOpenClawAgentDatabase,
   type OpenClawAgentDatabase,
 } from "../../state/openclaw-agent-db.js";
+import { resetConversationHistory } from "./conversation-history.js";
 import {
   SessionEntryLifecycleUpsertConflictError,
   type SessionArchivedTranscriptCleanupRule,
@@ -395,6 +396,7 @@ export async function applySessionEntryLifecycleMutation(params: {
         expectedEntry,
         routeContext,
         resetBoundary,
+        conversationHistoryReset,
       } of projected.upsertedEntries) {
         const sameKeyRemoval = validatedRemovals.find(
           (removal) => removal.sessionKey === sessionKey,
@@ -420,6 +422,12 @@ export async function applySessionEntryLifecycleMutation(params: {
         if (resetBoundary && expectedEntry?.sessionId) {
           const boundaryScope = { ...resolved, sessionId: expectedEntry.sessionId, sessionKey };
           appendSessionResetBoundary(transactionDb, boundaryScope, expectedEntry, resetBoundary);
+        }
+        if (conversationHistoryReset) {
+          if (conversationHistoryReset.owner.agentId !== resolved.agentId) {
+            throw new Error("Conversation history reset does not belong to the target agent");
+          }
+          resetConversationHistory(transactionDb, conversationHistoryReset);
         }
         writeSessionEntry(transactionDb, sessionKey, entry, {
           allowStoredAliases: params.allowCanonicalRepair === true,

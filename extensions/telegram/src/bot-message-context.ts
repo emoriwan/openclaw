@@ -5,10 +5,7 @@ import {
   shouldAckReaction as shouldAckReactionGate,
 } from "openclaw/plugin-sdk/channel-feedback";
 import { logInboundDrop } from "openclaw/plugin-sdk/channel-inbound";
-import type {
-  TelegramDirectConfig,
-  TelegramGroupConfig,
-} from "openclaw/plugin-sdk/config-contracts";
+import type { TelegramDirectConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
 import {
   deriveLastRoutePolicy,
@@ -106,8 +103,6 @@ export type TelegramMessageContext = {
   replyThreadId?: number;
   isForum: boolean;
   historyKey?: string;
-  historyLimit: BuildTelegramMessageContextParams["historyLimit"];
-  groupHistories: BuildTelegramMessageContextParams["groupHistories"];
   route: ReturnType<typeof resolveTelegramConversationRoute>["route"];
   skillFilter: TelegramMessageContextPayload["skillFilter"];
   sendTyping: () => Promise<void>;
@@ -132,16 +127,12 @@ export const buildTelegramMessageContext = async ({
   cfg,
   account,
   ownerAgentId,
-  historyLimit,
   dmHistoryLimit,
-  groupHistories,
   dmPolicy,
   allowFrom,
   groupAllowFrom,
   ackReactionScope,
   logger,
-  resolveGroupActivation,
-  resolveGroupRequireMention,
   resolveTelegramGroupConfig,
   runtime,
   sessionRuntime,
@@ -237,9 +228,6 @@ export const buildTelegramMessageContext = async ({
   const threadIdForConfig = resolvedThreadId ?? dmThreadId;
   const { groupConfig, topicConfig } = resolveTelegramGroupConfig(chatId, threadIdForConfig, cfg);
   const directConfig = !isGroup ? (groupConfig as TelegramDirectConfig | undefined) : undefined;
-  const telegramGroupConfig = isGroup
-    ? (groupConfig as TelegramGroupConfig | undefined)
-    : undefined;
   const effectiveDmPolicy = resolveTelegramEffectiveDmPolicy({
     isGroup,
     groupConfig,
@@ -299,7 +287,7 @@ export const buildTelegramMessageContext = async ({
     effectiveGroupAllow,
     senderId,
     senderUsername,
-    enforceAllowOverride: true,
+    enforceAllowOverride: !isGroup,
     requireSenderForAllowOverride: false,
   });
   if (!baseAccess.allowed) {
@@ -433,22 +421,7 @@ export const buildTelegramMessageContext = async ({
       mainSessionKey: route.mainSessionKey,
     }),
   };
-  const activationOverride = resolveGroupActivation({
-    sessionKey,
-    agentId: route.agentId,
-    cfg,
-  });
-  const baseRequireMention = resolveGroupRequireMention(chatId, cfg);
-  // Persisted session activation intentionally interleaves topic and group config.
-  // ScopeTree resolves config only, so this precedence remains session-owned here.
-  const groupRequireMention = firstDefined(
-    topicConfig?.requireMention,
-    activationOverride,
-    telegramGroupConfig?.requireMention,
-    baseRequireMention,
-  );
-  const requireMention =
-    isGroup && bindingMode.kind === "plugin-owned-runtime" ? false : groupRequireMention;
+  const groupRequireMention = isGroup;
 
   const recordChannelActivity =
     runtime?.recordChannelActivity ??
@@ -475,16 +448,19 @@ export const buildTelegramMessageContext = async ({
     threadSpec,
     originatingTo,
     routeAgentId: route.agentId,
+    storePath: isGroup
+      ? await resolveTelegramMessageContextStorePath({
+          cfg,
+          agentId: route.agentId,
+          sessionRuntime,
+        })
+      : undefined,
     sessionKey,
     effectiveGroupAllow,
     effectiveDmAllow: dmAllow.effectiveAllow,
     groupConfig,
     topicConfig,
-    providerMentionPatterns: cfg.channels?.telegram?.accounts?.[account.accountId]?.mentionPatterns,
-    requireMention: Boolean(requireMention),
     options,
-    groupHistories,
-    historyLimit,
     logger,
   });
   if (!bodyResult) {
@@ -524,15 +500,14 @@ export const buildTelegramMessageContext = async ({
     rawBody: bodyResult.rawBody,
     bodyText: bodyResult.bodyText,
     historyKey: bodyResult.historyKey ?? "",
-    historyLimit,
     dmHistoryLimit,
-    groupHistories,
     groupConfig,
     topicConfig,
     effectiveWasMentioned: bodyResult.effectiveWasMentioned,
     inboundEventKind: bodyResult.inboundEventKind,
-    groupRequireMention: Boolean(groupRequireMention),
+    groupRequireMention,
     mentionFacts: bodyResult.mentionFacts,
+    conversationHistory: bodyResult.conversationHistory,
     hasControlCommand: bodyResult.hasControlCommand,
     stickerCacheHit: bodyResult.stickerCacheHit,
     ...(bodyResult.audioTranscribedMediaIndex !== undefined
@@ -541,7 +516,7 @@ export const buildTelegramMessageContext = async ({
     locationData: bodyResult.locationData,
     options,
     dmAllowFrom: dmAllow.allowFrom,
-    effectiveGroupAllow,
+    groupAllowFrom: groupAllowOverride ?? groupAllowFrom,
     commandAuthorized: bodyResult.commandAuthorized,
     topicName,
     sessionRuntime,
@@ -675,8 +650,6 @@ export const buildTelegramMessageContext = async ({
     replyThreadId,
     isForum,
     historyKey: bodyResult.historyKey ?? "",
-    historyLimit,
-    groupHistories,
     route,
     skillFilter,
     sendTyping,

@@ -1,6 +1,9 @@
+import fs from "node:fs/promises";
 // Real grammY ingress and Bot API sockets: stalled forum metadata must not block delivery.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
+import os from "node:os";
+import path from "node:path";
 import { Bot } from "grammy";
 import { getChildLogger } from "openclaw/plugin-sdk/runtime-env";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -27,8 +30,10 @@ describe("Telegram supergroup ingress with a stalled Bot API response body", () 
   let getChatRequests = 0;
   let closedSocketCount = 0;
   let resolveGetChatHeaders: (() => void) | undefined;
+  let stateDirectory: string;
 
   beforeAll(async () => {
+    stateDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "telegram-forum-ingress-"));
     server = createServer((request, response) => {
       if (!request.url?.endsWith("/getChat")) {
         response.writeHead(404);
@@ -61,6 +66,7 @@ describe("Telegram supergroup ingress with a stalled Bot API response body", () 
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
+    await fs.rm(stateDirectory, { recursive: true, force: true });
   });
 
   it("dispatches DMs immediately and the supergroup after cancelling its stalled socket", async () => {
@@ -157,10 +163,9 @@ describe("Telegram supergroup ingress with a stalled Bot API response body", () 
         agentId: "integration",
         sessionEntry: undefined,
         sessionKey: "integration",
-        storePath: "integration",
+        storePath: path.join(stateDirectory, "sessions.json"),
         model: undefined,
       }),
-      resolvePromptContextAmbientWatermark: () => undefined,
       recordMessageForReplyChain: async (msg) => ({
         messageId: String(msg.message_id),
         sender: "integration sender",

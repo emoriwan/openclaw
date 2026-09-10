@@ -189,10 +189,10 @@ How inbound and outbound Telegram messages are routed, previewed, acknowledged, 
 
     **Scope (`messages.ackReactionScope`, default `"group-mentions"`; no Telegram-account or Telegram-channel override):**
 
-    `all` (DMs + groups, including ambient room events), `direct` (DMs only), `group-all` (every group message except ambient room events, no DMs), `group-mentions` (groups when the bot is mentioned; **no DMs** — default), `off` / `none` (disabled).
+    `all` (DMs + groups), `direct` (DMs only), `group-all` (groups only), `group-mentions` (groups when the bot is mentioned; **no DMs** — default), `off` / `none` (disabled).
 
     <Note>
-    The default scope (`group-mentions`) does not fire ack reactions in DMs or ambient room events. Use `direct` or `all` for DMs; only `all` acknowledges ambient room events. This value is read at Telegram provider startup, so a gateway restart is needed for the change to take effect.
+    The default scope (`group-mentions`) does not fire ack reactions in DMs. Use `direct` or `all` for DMs. This value is read at Telegram provider startup, so a gateway restart is needed for the change to take effect.
     </Note>
 
   </Accordion>
@@ -201,8 +201,9 @@ How inbound and outbound Telegram messages are routed, previewed, acknowledged, 
     - `channels.telegram.textChunkLimit` default 4000; `streaming.chunkMode="newline"` prefers paragraph boundaries (blank lines) before length splitting.
     - `channels.telegram.mediaMaxMb` (default 100) caps inbound and outbound media size.
     - When an inbound attachment cannot be downloaded and the message proceeds to the agent, its body includes a `[media unavailable: ...]` notice. Oversize notices include the effective size limit; partial albums include the failed and total attachment counts. This also applies to admitted channel posts, even when their separate chat warning is suppressed.
-    - group context history uses `channels.telegram.historyLimit` or `messages.groupChat.historyLimit` (default 50); `0` disables.
-    - reply/quote/forward supplemental context normalizes into one selected conversation context window when the gateway has observed the parent messages; the observed-message cache lives in OpenClaw SQLite plugin state, and `openclaw doctor --fix` imports legacy sidecars. Telegram only includes one shallow `reply_to_message` per update, so chains older than the cache are limited to that payload.
+    - unread group text survives restarts and is included with the next addressed request. `historyLimit` does not clip or disable observation. `/new` clears unread history through the reset request; later messages remain unread. Existing model and input-size limits still apply.
+    - background attachments are saved with references for later inspection. Receiving them does not start model work. Files follow the existing attachment lifetime: default cleanup preserves inbound files, while configured `attachments.ttlHours` expires them. Inspection returns an explicit unavailable result for an expired file.
+    - native reply chains and quote/forward context remain separate from unread group history. The observed-message cache lives in OpenClaw SQLite plugin state, and `openclaw doctor --fix` imports legacy sidecars. Telegram includes only one shallow `reply_to_message` per update, so uncached ancestry is limited to that payload. Private chats retain their selected conversation context window.
     - Telegram allowlists primarily gate who can trigger the agent, not a full supplemental-context redaction boundary.
     - DM history: `channels.telegram.dmHistoryLimit`, `channels.telegram.dms["<user_id>"].historyLimit`.
 

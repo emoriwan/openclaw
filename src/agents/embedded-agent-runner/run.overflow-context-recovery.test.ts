@@ -878,7 +878,7 @@ describe("recoverEmbeddedRunOverflow", () => {
     if (result.action !== "surface") {
       throw new Error("Expected exhausted overflow recovery to surface");
     }
-    expect(result.userText).toContain("/reset");
+    expect(result.userText).toContain("send it as a reply to this message");
     expect(result.userText).toContain("/new");
   });
 });

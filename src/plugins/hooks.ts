@@ -9,6 +9,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { clampPositiveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
 import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
+import {
+  isAgentHarnessPreflightError,
+  type AgentHarnessPreflightError,
+} from "../agents/harness/errors.js";
 import { createToolPolicyMatcher } from "../agents/tool-policy-match.js";
 import {
   attachToolAllowlistIntersection,
@@ -235,6 +239,7 @@ type PluginTargetedInboundClaimOutcome =
   | {
       status: "error";
       error: string;
+      preflightError?: AgentHarnessPreflightError;
     };
 
 type SyncHookName = "tool_result_persist" | "before_message_write";
@@ -986,7 +991,7 @@ export function createHookRunner(
     | { status: "missing_plugin" }
     | { status: "no_handler" }
     | { status: "declined" }
-    | { status: "error"; error: string }
+    | { status: "error"; error: string; preflightError?: AgentHarnessPreflightError }
   > {
     const pluginLoaded = registry.plugins.some(
       (plugin) => plugin.id === pluginId && plugin.status === "loaded",
@@ -1004,7 +1009,7 @@ export function createHookRunner(
       `[hooks] running ${hookName} for ${pluginId} (${hooks.length} handlers, targeted outcome)`,
     );
 
-    let firstError: string | null = null;
+    let firstError: { error: string; preflightError?: AgentHarnessPreflightError } | undefined;
     for (const hook of hooks) {
       try {
         const promise = Promise.resolve(
@@ -1016,13 +1021,21 @@ export function createHookRunner(
           return { status: "handled", result: handlerResult };
         }
       } catch (err) {
-        firstError ??= sanitizeHookError(err);
+        const preflightError = isAgentHarnessPreflightError(err) ? err : undefined;
+        firstError ??= {
+          error: sanitizeHookError(err),
+          ...(preflightError ? { preflightError } : {}),
+        };
+        // One uncertain handler prevents another handler's preflight failure from releasing custody.
+        if (!preflightError) {
+          delete firstError.preflightError;
+        }
         handleHookError({ hookName, pluginId: hook.pluginId, error: err });
       }
     }
 
     if (firstError) {
-      return { status: "error", error: firstError };
+      return { status: "error", ...firstError };
     }
     return { status: "declined" };
   }

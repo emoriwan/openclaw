@@ -575,7 +575,7 @@ describe("dispatchReplyFromConfig", () => {
       status: "handled",
       result: { handled: true, reply: { text: "Codex bound reply" } },
     });
-    const targetSessionKey = "plugin-binding:codex:history123";
+    const targetSessionKey = "agent:main:plugin:history123";
     const targetSessionEntry = {
       sessionId: "bound-session-id",
       updatedAt: Date.now(),

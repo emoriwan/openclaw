@@ -12,6 +12,7 @@ import {
   isProviderRequestSizeCeilingError,
 } from "../../embedded-agent-helpers.js";
 import type { FailoverClassification } from "../../failover/signal.js";
+import { CONTEXT_OVERFLOW_USER_TEXT } from "../../failover/user-copy.js";
 import { runContextEngineMaintenance } from "../context-engine-maintenance.js";
 import { log } from "../logger.js";
 import {
@@ -41,11 +42,7 @@ function renderOverflowResetGuidance(
   const sideEffectCaution = replayMetadata.hadPotentialSideEffects
     ? " Completed tool actions were not replayed; verify their effects before retrying."
     : "";
-  return (
-    "Context overflow: prompt too large for the model. " +
-    "Try /reset (or /new) to start a fresh session, or use a larger-context model." +
-    sideEffectCaution
-  );
+  return CONTEXT_OVERFLOW_USER_TEXT + sideEffectCaution;
 }
 
 type EmbeddedRunOverflowRecoveryOutcome =

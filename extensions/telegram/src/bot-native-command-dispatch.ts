@@ -40,9 +40,9 @@ import {
   resolveTelegramForumFlag,
   resolveTelegramGroupAllowFromContext,
   resolveTelegramMessageThreadSpec,
-  resolveTelegramThreadSpec,
 } from "./bot/helpers.js";
 import type { TelegramGetChat } from "./bot/types.js";
+import { recordTelegramNativeReset } from "./conversation-observation.js";
 import {
   buildTelegramConversationRouteContext,
   resolveTelegramConversationRoute,
@@ -115,7 +115,6 @@ export type TelegramCommandDispatch = TelegramCommandExecutorParams &
     runtimeCfg: OpenClawConfig;
     runtimeTelegramCfg: TelegramAccountConfig;
     turnSettings: ReturnType<typeof resolveTelegramMessageTurnSettings>;
-    threadSpec: ReturnType<typeof resolveTelegramThreadSpec>;
     threadParams: ReturnType<typeof buildTelegramThreadParams>;
     route: ReturnType<typeof resolveTelegramConversationRoute>["route"];
     mediaLocalRoots: readonly string[] | undefined;
@@ -475,7 +474,6 @@ export async function prepareTelegramCommandDispatch(
     runtimeTelegramCfg,
     turnSettings,
     ...auth,
-    threadSpec: auth.threadSpec,
     threadParams: buildTelegramThreadParams(auth.threadSpec),
     route,
     mediaLocalRoots,
@@ -488,6 +486,7 @@ export async function prepareTelegramCommandDispatch(
 
 export async function dispatchTelegramBuiltinTurn(params: {
   dispatch: TelegramCommandDispatch;
+  commandName: string;
   prompt: string;
   commandArgs?: import("openclaw/plugin-sdk/command-auth-native").CommandArgs;
 }): Promise<boolean> {
@@ -529,6 +528,7 @@ export async function dispatchTelegramBuiltinTurn(params: {
       : `group:${dispatch.chatId}`
     : (buildSenderName(dispatch.msg) ?? String(dispatch.senderId || dispatch.chatId));
   const ctxPayload = dispatch.nativeCommandRuntime.finalizeInboundContext({
+    ConversationHistory: await recordTelegramNativeReset(dispatch, params.commandName),
     Body: params.prompt,
     BodyForAgent: params.prompt,
     RawBody: params.prompt,

@@ -1,3 +1,4 @@
+import { AgentHarnessPreflightError } from "openclaw/plugin-sdk/agent-harness-registration";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { KeyedAsyncQueue } from "openclaw/plugin-sdk/keyed-async-queue";
 import type {
@@ -48,19 +49,30 @@ export async function handleCodexConversationInboundClaim(
   if (event.commandAuthorized !== true) {
     return { handled: true };
   }
-  const prompt = event.bodyForAgent?.trim() || event.content?.trim() || "";
-  if (!prompt) {
+  const requestText = event.bodyForAgent?.trim() || event.content?.trim() || "";
+  if (!requestText && !event.currentInboundContext?.text.trim()) {
     return { handled: true };
   }
   if (!canMutateCodexHost(event)) {
     return { handled: true, reply: { text: CODEX_NATIVE_EXECUTION_AUTH_ERROR } };
   }
   const sessionKey = event.sessionKey ?? ctx.sessionKey;
+  const preparePrompt = async () => {
+    const [{ fitCodexProjectedContextForTurnStart }, { prependCurrentInboundContext }] =
+      await Promise.all([
+        import("./app-server/context-engine-projection.js"),
+        import("./app-server/run-attempt-state.js"),
+      ]);
+    return fitCodexProjectedContextForTurnStart({
+      promptText: prependCurrentInboundContext(requestText, event.currentInboundContext),
+    });
+  };
   if (data.kind === "codex-cli-node-session") {
     try {
       const result = await getNodeConversationState().queue.enqueue(
         `${data.nodeId}:${data.sessionId}`,
         async () => {
+          const prompt = await preparePrompt();
           const { resolveCodexNativeSandboxBlock } = await import("./app-server/sandbox-guard.js");
           const blocked = resolveCodexNativeSandboxBlock({
             config: options.config,
@@ -92,6 +104,9 @@ export async function handleCodexConversationInboundClaim(
       );
       return { handled: true, reply: result.reply };
     } catch (error) {
+      if (error instanceof AgentHarnessPreflightError) {
+        throw error;
+      }
       return {
         handled: true,
         reply: {
@@ -106,6 +121,7 @@ export async function handleCodexConversationInboundClaim(
     // an already-arrived message, even when the execution module is still cold.
     const expected = options.bindingStore.read(identity);
     const result = await withCodexConversationThreadActivity(data.bindingId, async () => {
+      const prompt = await preparePrompt();
       const { resolveCodexNativeExecutionBlock } = await import("./app-server/sandbox-guard.js");
       const nativeExecutionBlock = resolveCodexNativeExecutionBlock({
         config: options.config,
@@ -159,6 +175,9 @@ export async function handleCodexConversationInboundClaim(
     });
     return { handled: true, reply: result.reply };
   } catch (error) {
+    if (error instanceof AgentHarnessPreflightError) {
+      throw error;
+    }
     return {
       handled: true,
       reply: {

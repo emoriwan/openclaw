@@ -13,12 +13,12 @@ Symptom-first checks for a Telegram bot that is not behaving.
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Bot does not respond to non mention group messages">
+  <Accordion title="Bot stays quiet during group discussion">
 
-    - If `requireMention=false`, Telegram privacy mode must allow full visibility: BotFather `/setprivacy` -> Disable, then remove + re-add the bot to the group.
-    - `openclaw channels status` warns when config expects unmentioned group messages.
+    - This is expected. Tag the bot or reply to one of its messages to start input.
+    - To retain ordinary group discussion, Telegram must deliver it: BotFather `/setprivacy` -> Disable, then remove + re-add the bot to the group.
     - `openclaw channels status --probe` checks explicit numeric group IDs; wildcard `"*"` cannot be membership-probed.
-    - Quick session test: `/activation always`.
+    - Legacy `requireMention: false` and `/activation always` do not enable ambient replies.
 
   </Accordion>
 

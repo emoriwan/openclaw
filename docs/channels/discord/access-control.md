@@ -166,17 +166,13 @@ Who may reach the bot, which guild channels it answers in, and which Discord act
   </Tab>
 
   <Tab title="Mentions and group DMs">
-    Guild messages are mention-gated by default.
+    Guild input requires a native bot mention or a native reply to this bot.
 
-    Mention detection includes:
-
-    - explicit bot mention
-    - configured mention patterns (`agents.entries.*.groupChat.mentionPatterns`, fallback `messages.groupChat.mentionPatterns`)
-    - implicit reply-to-bot behavior in supported cases
+    Permitted text is recorded without starting the agent. The next addressed request receives unread discussion through that request, including after a restart. Later messages wait for another addressed request. `/new` clears unread history through the reset request; later messages remain unread. Existing queue and steering settings still apply to addressed input.
 
     When writing outbound Discord messages, use canonical mention syntax: `<@USER_ID>` for users, `<#CHANNEL_ID>` for channels, and `<@&ROLE_ID>` for roles. Do not use the legacy `<@!USER_ID>` nickname mention form.
 
-    `requireMention` is configured per guild/channel (`channels.discord.guilds...`).
+    Legacy `requireMention: false`, mention patterns, prior thread participation, and `unmentionedInbound` no longer activate ordinary Discord room input. These config fields remain accepted, with a warning when configured; no Doctor cleanup is required to start.
     `ignoreOtherMentions` optionally drops messages addressed to another identity but not the bot. This covers explicit user/role mentions (excluding @everyone/@here) and replies to another non-webhook bot. An explicit mention of the current bot still wins.
 
     Group DMs:
@@ -189,7 +185,7 @@ Who may reach the bot, which guild channels it answers in, and which Discord act
 
 ### Guild channel maps are allowlists
 
-A guild entry with no `channels` map lets the bot work in every channel it can see, subject to the guild's `requireMention` and `users` rules. **Adding even one channel entry turns the map into an allowlist**: any channel not matched by an entry is denied, not merely left at guild defaults.
+A guild entry with no `channels` map lets the bot work in every channel it can see, subject to native addressing and the guild's `users` rules. **Adding even one channel entry turns the map into an allowlist**: any channel not matched by an entry is denied, not merely left at guild defaults.
 
 This surprises people who add one channel to give it special settings and find the bot has gone silent everywhere else. Use the `"*"` wildcard key to keep the rest of the guild reachable:
 
@@ -202,8 +198,8 @@ This surprises people who add one channel to give it special settings and find t
           requireMention: true,
           users: ["YOUR_USER_ID"],
           channels: {
-            // always-on room: everyone in it can talk to the bot, no mention needed
-            YOUR_CHANNEL_ID: { enabled: true, requireMention: false, users: ["*"] },
+            // anyone in this room may invoke the bot with a native mention or reply
+            YOUR_CHANNEL_ID: { enabled: true, users: ["*"] },
             // every other channel keeps the guild defaults
             "*": { enabled: true, requireMention: true },
           },

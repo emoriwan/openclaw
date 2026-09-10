@@ -3,6 +3,7 @@ import type { Message } from "grammy/types";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { resolveTelegramDmAllow } from "./access-groups.js";
 import { mergeTelegramAccountConfig } from "./account-config.js";
+import { resolveTelegramMessageAddress } from "./bot/body-helpers.js";
 import {
   resolveTelegramCommandAuthorization,
   resolveTelegramGroupAllowFromContext,
@@ -92,6 +93,7 @@ export type TelegramSupersedeAuthContext = {
   accountId: string;
   /** Bot username for @bot command targeting (from getMe / botInfo). */
   botUsername?: string;
+  botId?: number;
   /** Test seam / preloaded pairing-store ids; defaults to live pairing store. */
 };
 
@@ -106,6 +108,12 @@ export async function isTelegramSpooledUpdateSenderAuthorized(
 ): Promise<boolean> {
   const facts = extractUpdateSenderFacts(update);
   if (!facts) {
+    return false;
+  }
+  if (
+    facts.isGroup &&
+    !resolveTelegramMessageAddress(facts.message, { id: auth.botId, username: auth.botUsername })
+  ) {
     return false;
   }
   const accountCfg = mergeTelegramAccountConfig(auth.cfg, auth.accountId);

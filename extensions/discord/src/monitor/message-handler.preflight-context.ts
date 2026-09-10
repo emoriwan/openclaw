@@ -13,8 +13,6 @@ type SharedPreflightFields =
   | "buildContext"
   | "botUserId"
   | "abortSignal"
-  | "guildHistories"
-  | "historyLimit"
   | "mediaMaxBytes"
   | "textLimit"
   | "replyToMode"
@@ -44,8 +42,6 @@ export function buildDiscordMessagePreflightContext({
     buildContext: preflightParams.buildContext,
     botUserId: preflightParams.botUserId,
     abortSignal: preflightParams.abortSignal,
-    guildHistories: preflightParams.guildHistories,
-    historyLimit: preflightParams.historyLimit,
     mediaMaxBytes: preflightParams.mediaMaxBytes,
     textLimit: preflightParams.textLimit,
     replyToMode: preflightParams.replyToMode,

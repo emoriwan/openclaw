@@ -16,6 +16,7 @@ import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { vi } from "vitest";
 import type { TelegramNativeCommandDeps } from "./bot-native-command-deps.runtime.js";
 import { registerTelegramNativeCommands } from "./bot-native-commands.js";
+import { telegramBotInfoForTest } from "./bot.create-telegram-bot.test-support.js";
 
 resetPluginRuntimeStateForTest();
 setActivePluginRegistry(createEmptyPluginRegistry());
@@ -261,7 +262,10 @@ export function createTelegramGroupCommandContext(params?: {
   threadId?: number;
 }) {
   return {
+    me: telegramBotInfoForTest,
     message: {
+      text: "/status@openclaw_bot",
+      entities: [{ type: "bot_command" as const, offset: 0, length: 20 }],
       chat: { id: -100999, type: "supergroup", is_forum: true },
       from: {
         id: params?.senderId ?? 12345,

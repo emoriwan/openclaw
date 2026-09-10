@@ -1,3 +1,4 @@
+import type { CurrentInboundPromptContext } from "../agents/internal-runtime-context.js";
 /** Shared inbound message context types used by prompt templating and reply dispatch. */
 import type { InboundEventKind } from "../channels/inbound-event/kind.js";
 import type { DmScope, ReplyToMode } from "../config/types.base.js";
@@ -9,6 +10,7 @@ import type {
 import type { MediaFact } from "../media/media-facts.js";
 import type { PluginHookChannelContext } from "../plugins/hook-channel-context.types.js";
 import type { InputProvenance } from "../sessions/input-provenance.js";
+import type { ConversationHistoryCapture } from "../sessions/user-turn-input.types.js";
 import type { CommandTurnContext } from "./command-turn-context.js";
 import type { CommandArgs } from "./commands-args.types.js";
 import type { HistoryEntry } from "./reply/history.types.js";
@@ -122,6 +124,9 @@ export type MsgContext = Partial<CanonicalInboundText> & {
    * as structured context blocks in the user prompt rather than rendering plaintext envelopes.
    */
   InboundHistory?: HistoryEntry[];
+  /** Fixed observed-message range carried with this addressed input. */
+  ConversationHistory?: ConversationHistoryCapture;
+  CurrentInboundContext?: CurrentInboundPromptContext;
   /** Internal facts used to merge canonical transcript turns before dispatch. */
   SessionTranscriptContext?: SessionTranscriptContext;
   /**

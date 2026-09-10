@@ -8,7 +8,10 @@ import type { OpenClawConfig, TelegramAccountConfig } from "openclaw/plugin-sdk/
 import { clearPluginCommands, registerPluginCommand } from "openclaw/plugin-sdk/plugin-runtime";
 import type { SessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createTelegramTopicCommandContext } from "./bot-native-commands.fixture-test-support.js";
+import {
+  createTelegramGroupCommandContext,
+  createTelegramTopicCommandContext,
+} from "./bot-native-commands.fixture-test-support.js";
 import {
   createCommandBot,
   createNativeCommandTestParams,
@@ -250,21 +253,15 @@ describe("registerTelegramNativeCommands", () => {
   it("replies to unmatched plugin commands in the originating forum topic", async () => {
     const { handler, sendMessage } = registerPlugCommand({ acceptsArgs: false });
 
-    await handler({
-      match: "unexpected",
-      message: {
-        message_id: 2,
-        date: Math.floor(Date.now() / 1000),
-        chat: {
-          id: UNMATCHED_FORUM_CHAT_ID,
-          type: "supergroup",
-          title: "Forum Group",
-          is_forum: true,
-        },
-        message_thread_id: 77,
-        from: { id: 200, username: "bob" },
-      },
-    });
+    await handler(
+      createTelegramTopicCommandContext({
+        command: "plug",
+        match: "unexpected",
+        chatId: UNMATCHED_FORUM_CHAT_ID,
+        title: "Forum Group",
+        threadId: 77,
+      }),
+    );
 
     const sendMessageCall = firstCall(sendMessage);
     expect(sendMessageCall[0]).toBe(UNMATCHED_FORUM_CHAT_ID);
@@ -533,21 +530,14 @@ describe("registerTelegramNativeCommands", () => {
   it("forwards topic-scoped binding context to Telegram plugin commands", async () => {
     const { handler } = registerPlugCommand();
 
-    await handler({
-      match: "",
-      message: {
-        message_id: 2,
-        date: Math.floor(Date.now() / 1000),
-        chat: {
-          id: BOUND_FORUM_CHAT_ID,
-          type: "supergroup",
-          title: "Forum Group",
-          is_forum: true,
-        },
-        message_thread_id: 77,
-        from: { id: 200, username: "bob" },
-      },
-    });
+    await handler(
+      createTelegramTopicCommandContext({
+        command: "plug",
+        chatId: BOUND_FORUM_CHAT_ID,
+        title: "Forum Group",
+        threadId: 77,
+      }),
+    );
 
     const commandParams = firstExecutePluginCommandParams();
     expect(commandParams.channel).toBe("telegram");
@@ -567,19 +557,13 @@ describe("registerTelegramNativeCommands", () => {
       botHarness: createCommandBot({ api: { getChat } }),
     });
 
-    await handler({
-      match: "",
-      message: {
-        message_id: 2,
-        date: Math.floor(Date.now() / 1000),
-        chat: {
-          id: GENERAL_FORUM_CHAT_ID,
-          type: "supergroup",
-          title: "Forum Group",
-        },
-        from: { id: 200, username: "bob" },
-      },
-    });
+    await handler(
+      createTelegramGroupCommandContext({
+        command: "plug",
+        chatId: GENERAL_FORUM_CHAT_ID,
+        title: "Forum Group",
+      }),
+    );
 
     expect(getChat).toHaveBeenCalledWith(GENERAL_FORUM_CHAT_ID);
     const commandParams = firstExecutePluginCommandParams();
@@ -639,6 +623,7 @@ describe("registerTelegramNativeCommands", () => {
 
     await handler(
       createTelegramTopicCommandContext({
+        command: "plug",
         match: "bind --cwd /tmp/work",
         chatId: PERSISTED_FORUM_CHAT_ID,
         threadId: 42,

@@ -26,7 +26,7 @@ Symptom-first checks for a Discord account that is not behaving.
     - verify `groupPolicy`
     - verify guild allowlist under `channels.discord.guilds`
     - if a guild `channels` map exists, only listed channels are allowed
-    - verify `requireMention` behavior and mention patterns
+    - mention the bot natively or reply to one of its messages; text patterns and prior thread participation do not start a turn
 
     The Control UI channel details and `openclaw channels status` warn when the
     effective policy is `allowlist` but no guilds are configured. Add your server
@@ -51,10 +51,9 @@ openclaw logs --follow
   </Accordion>
 
   <Accordion title="Require mention false but still blocked">
-    Common causes:
+    `requireMention: false` is accepted as legacy config but no longer enables ambient replies. Use a native bot mention or reply. If an addressed request is still blocked, check:
 
     - `groupPolicy="allowlist"` without matching guild/channel allowlist
-    - `requireMention` configured in the wrong place (must be under `channels.discord.guilds` or a channel entry)
     - sender blocked by guild/channel `users` allowlist
 
   </Accordion>

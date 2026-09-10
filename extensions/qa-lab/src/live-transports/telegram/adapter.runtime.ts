@@ -5,6 +5,7 @@ import {
   assertQaGatewayCredentialLeaseQuarantine,
   shouldRetainQaGatewayCredentialLease,
 } from "../../gateway-process-boundary.js";
+import { renderTelegramQaInbound } from "../../telegram-inbound.js";
 import {
   acquireQaCredentialLease,
   startQaCredentialLeaseHeartbeat,
@@ -44,18 +45,6 @@ function describeTelegramQaObserverState(state: TelegramQaObserverState) {
     `matched=${renderTelegramQaDiagnosticCount(state.matchedCount)}`,
     `update kinds=[${updateKinds.join(",")}]`,
   ].join("; ");
-}
-
-function renderTelegramQaInboundText(
-  input: { text: string; nativeCommand?: { name: string } },
-  botUsername: string,
-) {
-  const commandName = input.nativeCommand?.name.trim().toLowerCase();
-  const renderedText = input.text.replaceAll("@openclaw", `@${botUsername}`);
-  const commandToken = renderedText.match(/^\S+/u)?.[0];
-  return commandName && commandToken?.toLowerCase() === `/${commandName}`
-    ? `/${commandName}@${botUsername}${renderedText.slice(commandToken.length)}`
-    : renderedText;
 }
 
 async function releaseTelegramCredential(params: {
@@ -231,7 +220,7 @@ export async function createTelegramQaTransportAdapter(
       heartbeat.throwIfFailed();
       logicalConversationId = input.conversation.id;
       logicalConversationKind = input.conversation.kind;
-      const text = renderTelegramQaInboundText(input, credentialLease.payload.sutUsername);
+      const { text } = renderTelegramQaInbound(input, credentialLease.payload.sutUsername);
       const nativeReplyToId = input.replyToId ? nativeMessageIds.get(input.replyToId) : undefined;
       sendsInFlight += 1;
       try {

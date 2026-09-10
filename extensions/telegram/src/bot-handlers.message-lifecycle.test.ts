@@ -1,9 +1,6 @@
 import type { Message } from "grammy/types";
 import { describe, expect, it } from "vitest";
-import {
-  buildSyntheticTextMessage,
-  formatTelegramAmbientTranscriptBody,
-} from "./bot-handlers.message-context.js";
+import { buildSyntheticTextMessage } from "./bot-handlers.message-context.js";
 
 function message(fields: Record<string, unknown>): Message {
   return {
@@ -15,32 +12,7 @@ function message(fields: Record<string, unknown>): Message {
   } as unknown as Message;
 }
 
-describe("Telegram ambient transcript media text", () => {
-  it("renders native media kinds for captionless transcript lines", () => {
-    const body = formatTelegramAmbientTranscriptBody([
-      message({
-        message_id: 7,
-        photo: [{ file_id: "photo-1", file_unique_id: "photo-u1", width: 1, height: 1 }],
-      }),
-    ]);
-
-    expect(body).toBe("#7 Ada: <media:image>");
-  });
-
-  it("preserves captions instead of appending media text", () => {
-    const body = formatTelegramAmbientTranscriptBody([
-      message({ message_id: 8, caption: "diagram", document: { file_id: "doc-1" } }),
-    ]);
-
-    expect(body).toBe("#8 Ada: diagram");
-  });
-
-  it("uses the formatter attachment fallback for media-less empty messages", () => {
-    const body = formatTelegramAmbientTranscriptBody([message({ message_id: 9 })]);
-
-    expect(body).toBe("#9 Ada: <media:attachment>");
-  });
-
+describe("Telegram synthetic message formatting", () => {
   it("preserves combined formatting entities when building synthetic text messages", () => {
     const entities = [{ type: "bold" as const, offset: 3, length: 4 }];
     const synthetic = buildSyntheticTextMessage({

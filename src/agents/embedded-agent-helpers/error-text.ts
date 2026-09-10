@@ -23,6 +23,7 @@ import {
 import type { PreparedProviderFailoverOwner } from "../failover/provider-patterns.js";
 import {
   AUTH_INVALID_TOKEN_USER_TEXT,
+  CONTEXT_OVERFLOW_USER_TEXT,
   formatBillingErrorMessage,
   formatDiskSpaceErrorCopy,
   isInvalidStreamingEventOrderError,
@@ -178,10 +179,7 @@ export function formatAssistantErrorText(
     return formatCopy;
   }
   if (failoverReason === "context_overflow") {
-    return (
-      "Context overflow: prompt too large for the model. " +
-      "Try /reset (or /new) to start a fresh session, or use a larger-context model."
-    );
+    return CONTEXT_OVERFLOW_USER_TEXT;
   }
   if (isReasoningConstraintErrorMessage(raw)) {
     return (

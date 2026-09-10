@@ -31,6 +31,7 @@ import {
 } from "../../agents/agent-scope.js";
 import { QuestionAnswerUnconfirmedError } from "../../agents/harness/gateway-question-dispatch.js";
 import { claimPendingAgentQuestionAnswer } from "../../agents/harness/gateway-question.js";
+import { neutralizeQuotedContextSelectionSigils } from "../../agents/internal-runtime-context.js";
 import { toolPolicyRestrictsTools } from "../../agents/tool-policy.js";
 import { recordRuntimeActionDecision } from "../../audit/runtime-action-decision.js";
 import type { ChatType } from "../../channels/chat-type.js";
@@ -152,7 +153,14 @@ type DispatchProcessedRecorder = (
 ) => void;
 
 function resolveAcpPromptText(ctx: FinalizedRuntimeMsgContext): string {
-  return ctx.agentText.trim();
+  return [
+    ctx.CurrentInboundContext?.text
+      ? neutralizeQuotedContextSelectionSigils(ctx.CurrentInboundContext.text)
+      : undefined,
+    ctx.agentText.trim(),
+  ]
+    .filter(Boolean)
+    .join(ctx.CurrentInboundContext?.promptJoiner ?? "\n\n");
 }
 
 function resolveAcpRequestId(ctx: FinalizedRuntimeMsgContext): string {
@@ -591,7 +599,7 @@ export async function tryDispatchAcpReplyCore(params: {
     abortSignal: params.abortSignal,
     runId: params.runId,
   });
-  const pendingAnswerText = resolveAcpPromptText(params.ctx);
+  const pendingAnswerText = params.ctx.agentText.trim();
   const inputRecorder = params.userTurnTranscriptRecorder;
   const assertInputCurrent = () => {
     params.abortSignal?.throwIfAborted();

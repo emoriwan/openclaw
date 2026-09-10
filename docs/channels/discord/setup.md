@@ -240,40 +240,12 @@ Once DMs work, you can turn your server into a full workspace where each channel
 
   </Step>
 
-  <Step title="Allow responses without @mention">
-    By default, the agent only responds in guild channels when @mentioned. On a private server you probably want it to respond to every message.
+  <Step title="Talk normally, then address the bot">
+    The bot records permitted guild text without starting the agent. Mention it or reply to one of its messages when you want an answer; that request receives unread discussion, including after a Gateway restart.
 
-    In guild channels, normal replies post automatically by default. For shared always-on rooms, opt into `messages.groupChat.visibleReplies: "message_tool"` so the agent can lurk and only post when it decides a channel reply is useful. This works best with latest-generation, tool-reliable models such as GPT-5.6 Sol. Ambient room events stay quiet unless the tool sends. See [Ambient room events](/channels/ambient-room-events) for the full lurk-mode config.
+    Native slash commands remain explicit interactions. Mention patterns, prior thread participation, and legacy `requireMention: false` do not enable ambient replies. Existing configs still start and receive a warning about retired settings.
 
-    If Discord shows typing and the logs show token usage but no posted message, check whether the turn was configured as an ambient room event or opted into message-tool visible replies.
-
-    Session-busy notices also respect this reply policy. For ambient events and message-tool replies, Discord records the failure and suppressed notice in Gateway logs without posting to the room.
-
-    <Tabs>
-      <Tab title="Ask your agent">
-        > "Allow my agent to respond on this server without having to be @mentioned"
-      </Tab>
-      <Tab title="Config">
-        Set `requireMention: false` in your guild config:
-
-```json5
-{
-  channels: {
-    discord: {
-      guilds: {
-        YOUR_SERVER_ID: {
-          requireMention: false,
-        },
-      },
-    },
-  },
-}
-```
-
-        To require message-tool sends for visible group/channel replies, set `messages.groupChat.visibleReplies: "message_tool"`.
-
-      </Tab>
-    </Tabs>
+    Normal replies post automatically. `messages.groupChat.visibleReplies: "message_tool"` controls delivery for addressed turns; it does not make ordinary chatter start a turn.
 
   </Step>
 

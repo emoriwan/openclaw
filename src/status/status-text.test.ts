@@ -5,6 +5,12 @@ import {
   resetSubagentRegistryForTests,
 } from "../agents/subagents/registry/subagent-registry.test-helpers.js";
 import { formatSqliteSessionFileMarker } from "../config/sessions/legacy-sqlite-marker.js";
+import {
+  captureActivePluginRegistrySnapshot,
+  restoreActivePluginRegistrySnapshot,
+  setActivePluginRegistry,
+} from "../plugins/runtime.js";
+import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { normalizeSessionDeliveryState } from "../utils/delivery-context.shared.js";
 import { appendSessionCostLine } from "./status-runtime-lines.js";
 import { buildStatusReplyParts, buildStatusText } from "./status-text.js";
@@ -32,19 +38,21 @@ vi.mock("../infra/provider-usage.js", async (importOriginal) => {
 
 type StatusTextParams = Parameters<typeof buildStatusText>[0];
 
-async function renderTelegramStatus(params: {
+async function renderChannelStatus(params: {
   cfg: StatusTextParams["cfg"];
   sessionEntry: NonNullable<StatusTextParams["sessionEntry"]>;
   statusAccountId?: string;
   sessionKey?: string;
   agentId?: string;
+  statusChannel?: string;
+  isGroup?: boolean;
 }): Promise<string> {
   return await buildStatusText({
     cfg: params.cfg,
     sessionEntry: params.sessionEntry,
     sessionKey: params.sessionKey ?? "agent:main:main",
     ...(params.agentId ? { agentId: params.agentId } : {}),
-    statusChannel: "telegram",
+    statusChannel: params.statusChannel ?? "telegram",
     ...(params.statusAccountId ? { statusAccountId: params.statusAccountId } : {}),
     provider: "openai",
     model: "gpt-5.4-mini",
@@ -52,7 +60,7 @@ async function renderTelegramStatus(params: {
     resolvedVerboseLevel: "off",
     resolvedReasoningLevel: "off",
     resolveDefaultThinkingLevel: async () => undefined,
-    isGroup: false,
+    isGroup: params.isGroup ?? false,
     defaultGroupActivation: () => "mention",
     pluginHealthLineOverride: "Plugins: test",
     taskLineOverride: "",
@@ -66,12 +74,54 @@ async function renderTelegramStatus(params: {
 
 describe("buildStatusText channel features", () => {
   it.each([
+    { channel: "telegram", modes: ["mention"] as const, expected: "mention" },
+    { channel: "discord", modes: ["mention"] as const, expected: "mention" },
+    { channel: "matrix", modes: ["mention", "always"] as const, expected: "always" },
+    { channel: "whatsapp", modes: undefined, expected: "always" },
+  ])(
+    "reports supported activation on $channel without rewriting legacy session settings",
+    async ({ channel, modes, expected }) => {
+      const snapshot = captureActivePluginRegistrySnapshot();
+      try {
+        setActivePluginRegistry(
+          createTestRegistry([
+            {
+              pluginId: channel,
+              source: "test",
+              plugin: {
+                ...createChannelTestPluginBase({ id: channel }),
+                commands: { groupActivationModes: modes },
+              },
+            },
+          ]),
+        );
+        const sessionEntry: NonNullable<StatusTextParams["sessionEntry"]> = {
+          sessionId: "group-activation-status",
+          updatedAt: 0,
+          groupActivation: "always",
+        };
+        const text = await renderChannelStatus({
+          cfg: {},
+          sessionEntry,
+          sessionKey: `agent:main:${channel}:group:room`,
+          statusChannel: channel,
+          isGroup: true,
+        });
+        expect(text).toContain(`Activation: ${expected}`);
+        expect(sessionEntry.groupActivation).toBe("always");
+      } finally {
+        restoreActivePluginRegistrySnapshot(snapshot);
+      }
+    },
+  );
+
+  it.each([
     { richMessages: undefined, expected: "Telegram rich messages: off" },
     { richMessages: false, expected: "Telegram rich messages: off" },
     { richMessages: true, expected: "Telegram rich messages: on" },
   ])("shows Telegram rich message state for %s", async ({ richMessages, expected }) => {
     const telegram = richMessages === undefined ? {} : { richMessages };
-    const text = await renderTelegramStatus({
+    const text = await renderChannelStatus({
       cfg: { channels: { telegram } },
       sessionEntry: { sessionId: `telegram-rich-${String(richMessages)}`, updatedAt: 0 },
     });
@@ -85,7 +135,7 @@ describe("buildStatusText channel features", () => {
   });
 
   it("uses Telegram account rich message overrides", async () => {
-    const text = await renderTelegramStatus({
+    const text = await renderChannelStatus({
       cfg: {
         channels: {
           telegram: {
@@ -108,7 +158,7 @@ describe("buildStatusText channel features", () => {
   });
 
   it("uses the current Telegram command account before the session records it", async () => {
-    const text = await renderTelegramStatus({
+    const text = await renderChannelStatus({
       cfg: {
         channels: {
           telegram: {
@@ -151,7 +201,7 @@ describe("buildStatusText global subagent scope", () => {
         });
       }
 
-      const text = await renderTelegramStatus({
+      const text = await renderChannelStatus({
         cfg: {
           agents: {
             entries: {

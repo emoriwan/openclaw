@@ -43,6 +43,7 @@ import type {
   TraceLevel,
   VerboseLevel,
 } from "../directives.js";
+import type { ObservedReplyInputOwner } from "../observed-reply-input.js";
 import type { ReplyOperationRunState } from "../reply-operation-run-state.js";
 
 export type QueueDropPolicy = "old" | "new" | "summarize";
@@ -104,6 +105,8 @@ export type FollowupRun = {
   transcriptPrompt?: string;
   /** Shared lifecycle owner for the current user-turn transcript append. */
   userTurnTranscriptRecorder?: UserTurnTranscriptRecorder;
+  /** Custody transfers here only after queue admission succeeds. */
+  observedInput?: ObservedReplyInputOwner;
   currentInboundEventKind?: InboundEventKind;
   /** Whether the current inbound message contained audio for inbound-only TTS policy. */
   currentInboundAudio?: boolean;
@@ -294,7 +297,10 @@ const retiredTurnAdoptionCancellationLifecycles = new WeakSet<TurnAdoptionLifecy
 const completedTurnAdoptionLifecycles = new WeakSet<TurnAdoptionLifecycle>();
 const completedTurnAdoptionLifecycleCallbacks = new WeakSet<TurnAdoptionLifecycle>();
 
-type FollowupLifecycleRun = Pick<FollowupRun, "steerPending" | "turnAdoptionLifecycle">;
+type FollowupLifecycleRun = Pick<
+  FollowupRun,
+  "steerPending" | "turnAdoptionLifecycle" | "userTurnTranscriptRecorder" | "observedInput"
+>;
 
 export function markFollowupRunEnqueued(run: FollowupLifecycleRun): boolean {
   const lifecycle = run.turnAdoptionLifecycle;
@@ -353,6 +359,7 @@ export function completeFollowupRunLifecycle(
   const lifecycle = run.turnAdoptionLifecycle;
 
   const finish = () => {
+    run.observedInput?.finish(disposition === "consumed" ? "interrupted" : "cancelled");
     if (!lifecycle || completedTurnAdoptionLifecycleCallbacks.has(lifecycle)) {
       return;
     }

@@ -111,44 +111,57 @@ export async function prepareWorkerTurnAttachments(params: {
   const facts =
     heldFacts ?? (message ? readPersistedMediaFacts(message) : undefined) ?? turn.media ?? [];
   const files: Array<{ name: string; buffer: Buffer }> = [];
+  const unavailableBackground: string[] = [];
   const seen = new Set<string>();
   let remainingBytes = MAX_PAYLOAD_BYTES;
   const maxBytes = resolveChatAttachmentMaxBytes(turn.config ?? {});
-  for (const fact of facts) {
+  const orderedFacts = [
+    ...facts.filter((fact) => fact.contextOnly !== true),
+    ...facts.filter((fact) => fact.contextOnly === true),
+  ];
+  for (const fact of orderedFacts) {
     const sources = [fact.url, fact.path];
     let reference: Awaited<ReturnType<typeof resolveInboundMediaReference>> = null;
-    for (const source of sources) {
-      if (!source) {
+    let saved: Awaited<ReturnType<typeof readMediaBuffer>>;
+    try {
+      for (const source of sources) {
+        if (!source) {
+          continue;
+        }
+        reference = await resolveInboundMediaReference(source);
+        check();
+        if (reference) {
+          break;
+        }
+      }
+      if (!reference) {
+        if (sources.some((source) => source && !isPassThroughRemoteMediaSource(source))) {
+          throw new Error(
+            "Cloud attachment original is unavailable in managed media storage; attach the file again and retry.",
+          );
+        }
         continue;
       }
-      reference = await resolveInboundMediaReference(source);
-      check();
-      if (reference) {
-        break;
+      if (seen.has(reference.id)) {
+        continue;
       }
-    }
-    if (!reference) {
-      if (sources.some((source) => source && !isPassThroughRemoteMediaSource(source))) {
+      seen.add(reference.id);
+      if (files.length >= MAX_TURN_ATTACHMENTS) {
         throw new Error(
-          "Cloud attachment original is unavailable in managed media storage; attach the file again and retry.",
+          `Cloud turns support at most ${MAX_TURN_ATTACHMENTS} original attachments; send fewer files and retry.`,
         );
       }
-      continue;
-    }
-    if (seen.has(reference.id)) {
-      continue;
-    }
-    seen.add(reference.id);
-    if (files.length >= MAX_TURN_ATTACHMENTS) {
-      throw new Error(
-        `Cloud turns support at most ${MAX_TURN_ATTACHMENTS} original attachments; send fewer files and retry.`,
+      saved = await readMediaBuffer(reference.id, "inbound", Math.min(maxBytes, remainingBytes));
+    } catch (error) {
+      check();
+      if (fact.contextOnly !== true) {
+        throw error;
+      }
+      unavailableBackground.push(
+        JSON.stringify(fact.fileName ?? fact.path ?? fact.url ?? "attachment"),
       );
+      continue;
     }
-    const saved = await readMediaBuffer(
-      reference.id,
-      "inbound",
-      Math.min(maxBytes, remainingBytes),
-    );
     check();
     remainingBytes -= saved.buffer.length;
     const parsed = path.parse(
@@ -157,8 +170,11 @@ export async function prepareWorkerTurnAttachments(params: {
     const name = `${files.length + 1}-${truncateUtf16Safe(parsed.name, 48)}${truncateUtf16Safe(parsed.ext, 12)}`;
     files.push({ name, buffer: saved.buffer });
   }
+  const unavailableNote = unavailableBackground.length
+    ? `Earlier attachments are unavailable in this execution workspace because their sources expired or the attachment transfer limit was reached: ${unavailableBackground.join(", ")}. Ask the sender to attach a needed file again; do not claim to have inspected these files.`
+    : undefined;
   if (!files.length) {
-    return undefined;
+    return unavailableNote;
   }
   const directory = `${WORKER_ATTACHMENT_DIRECTORY_PREFIX}${randomUUID()}`;
   const deadline = Date.now() + turn.timeoutMs;
@@ -238,6 +254,10 @@ export async function prepareWorkerTurnAttachments(params: {
     }
     throw error;
   }
-  // Only a fixed template and generated UUID enter model context, well below 2 KiB.
-  return `Current attachment originals are available in this execution workspace at ${JSON.stringify(directory + "/")}. List that directory to find the attached files by name; use these copies when earlier attachment markers refer to Gateway-local storage.`;
+  return [
+    `Attachment originals are available in this execution workspace at ${JSON.stringify(directory + "/")}. List that directory to find the attached files by name; use these copies when earlier attachment markers refer to Gateway-local storage.`,
+    unavailableNote,
+  ]
+    .filter(Boolean)
+    .join("\n");
 }

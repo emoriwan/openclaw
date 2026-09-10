@@ -258,7 +258,7 @@ describe("runEmbeddedAgent mid-turn precheck retry", () => {
 
       expect(mockedCompactDirect).toHaveBeenCalledOnce();
       expect(mockedRunEmbeddedAttempt).toHaveBeenCalledOnce();
-      expect(result.payloads?.[0]?.text).toContain("Try /reset (or /new)");
+      expect(result.payloads?.[0]?.text).toContain("Use /new to start a fresh session");
     },
   );
 
@@ -305,7 +305,7 @@ describe("runEmbeddedAgent mid-turn precheck retry", () => {
 
     expect(mockedCompactDirect).toHaveBeenCalledOnce();
     expect(mockedRunEmbeddedAttempt).toHaveBeenCalledOnce();
-    expect(result.payloads?.[0]?.text).toContain("Try /reset (or /new)");
+    expect(result.payloads?.[0]?.text).toContain("Use /new to start a fresh session");
     expect(result.payloads?.[0]?.text).toContain("Completed tool actions were not replayed");
   });
 });

@@ -691,6 +691,42 @@ describe("commands registry", () => {
 });
 
 describe("commands registry args", () => {
+  it.each([
+    { provider: "telegram", modes: ["mention"] as const, expected: ["mention"] },
+    { provider: "discord", modes: ["mention"] as const, expected: ["mention"] },
+    { provider: "matrix", modes: undefined, expected: ["mention", "always"] },
+  ])(
+    "keeps $provider activation specs and menus within supported modes",
+    ({ provider, modes, expected }) => {
+      setActivePluginRegistry(
+        createTestRegistry([
+          {
+            pluginId: provider,
+            source: "test",
+            plugin: {
+              ...createChannelTestPluginBase({ id: provider }),
+              commands: { groupActivationModes: modes },
+            },
+          },
+        ]),
+      );
+      const command = findCommandByNativeName("activation", provider);
+      if (!command) {
+        throw new Error("Activation command is missing");
+      }
+      const native = listNativeCommandSpecs({ provider }).find(
+        (entry) => entry.name === "activation",
+      );
+      expect(native?.args?.[0]).toMatchObject({
+        choices: expected,
+        description: expected.join(" or "),
+      });
+      expect(resolveCommandArgMenu({ command })?.choices.map((choice) => choice.value)).toEqual(
+        expected,
+      );
+    },
+  );
+
   function createUsageModeCommand(
     argsParsing: ChatCommandDefinition["argsParsing"] = "positional",
     description = "mode",

@@ -6,6 +6,8 @@ import type {
   TelegramGroupConfig,
   TelegramTopicConfig,
 } from "openclaw/plugin-sdk/config-contracts";
+import { MediaFetchError } from "openclaw/plugin-sdk/media-runtime";
+import type { ConversationHistoryCapture } from "openclaw/plugin-sdk/reply-history";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import type { NormalizedAllowFrom } from "./bot-access.js";
 import {
@@ -28,7 +30,6 @@ import type {
   TelegramInboundDisposition,
 } from "./bot-handlers.types.js";
 import type {
-  TelegramAmbientTranscriptWatermark,
   TelegramChannelIngressResolver,
   TelegramMediaRef,
 } from "./bot-message-context.types.js";
@@ -36,6 +37,7 @@ import {
   isTelegramSpooledReplayUpdate,
   recordTelegramMessageProcessingResult,
 } from "./bot-processing-outcome.js";
+import { resolveTelegramMessageAddress } from "./bot/body-helpers.js";
 import { resolveMedia } from "./bot/delivery.resolve-media.js";
 import {
   buildTelegramThreadParams,
@@ -44,6 +46,7 @@ import {
   resolveTelegramPrimaryMedia,
 } from "./bot/helpers.js";
 import type { TelegramContext } from "./bot/types.js";
+import { recordTelegramConversationMedia } from "./conversation-observation.js";
 import { resolveTelegramCommandIngressAuthorization } from "./ingress.js";
 import type { TelegramMessageDispatchReplayClaim } from "./message-dispatch-dedupe.js";
 
@@ -52,12 +55,12 @@ export interface TelegramInboundProcessing {
 }
 
 type TelegramInboundMessage = {
+  conversationHistory?: ConversationHistoryCapture;
   authorizationCfg: OpenClawConfig;
   ctx: TelegramContext;
   msg: Message;
   chatId: number;
   isGroup: boolean;
-  isForum: boolean;
   threadSpec: TelegramThreadSpec;
   dmPolicy: DmPolicy;
   storeAllowFrom: string[];
@@ -70,22 +73,11 @@ type TelegramInboundMessage = {
   sendOversizeWarning: boolean;
   oversizeLogMessage: string;
   promptContextMinTimestampMs?: number;
-  promptContextAmbientWatermark?: TelegramAmbientTranscriptWatermark;
   dispatchDedupeClaims: TelegramMessageDispatchReplayClaim[];
 };
 
 export function createTelegramInboundProcessing({
-  params: {
-    cfg,
-    accountId,
-    bot,
-    opts,
-    runtime,
-    mediaMaxBytes,
-    logger,
-    resolveGroupActivation,
-    resolveGroupRequireMention,
-  },
+  params: { cfg, accountId, bot, opts, runtime, mediaMaxBytes, logger },
   message,
 }: {
   params: RegisterTelegramHandlerParams;
@@ -106,16 +98,12 @@ export function createTelegramInboundProcessing({
     handleTextFragment,
   } = createTelegramInboundBuffers({ params: { cfg, bot, runtime, opts }, message });
 
-  const { handleMediaGroup, resolveUnaddressedGroupMediaDisposition } = createTelegramInboundMedia({
+  const { withMediaGroupReceipt, shouldWarnOnMediaFailure } = createTelegramInboundMedia({
     params: {
       accountId,
       bot,
       opts,
       runtime,
-      mediaMaxBytes,
-      logger,
-      resolveGroupActivation,
-      resolveGroupRequireMention,
     },
     message,
   });
@@ -123,12 +111,12 @@ export function createTelegramInboundProcessing({
     params: TelegramInboundMessage,
   ): Promise<TelegramInboundDisposition> => {
     const {
+      conversationHistory,
       authorizationCfg,
       ctx,
       msg,
       chatId,
       isGroup,
-      isForum,
       threadSpec,
       dmPolicy,
       storeAllowFrom,
@@ -136,12 +124,9 @@ export function createTelegramInboundProcessing({
       effectiveGroupAllow,
       effectiveDmAllow,
       channelIngressResolver,
-      groupConfig,
-      topicConfig,
       sendOversizeWarning,
       oversizeLogMessage,
       promptContextMinTimestampMs,
-      promptContextAmbientWatermark,
       dispatchDedupeClaims,
     } = params;
     const resolvedThreadId =
@@ -151,7 +136,9 @@ export function createTelegramInboundProcessing({
 
     const messageText = getTelegramTextParts(msg).text;
     const botUsername = ctx.me?.username;
-    const isAbortControlMessage = isAbortRequestText(messageText, { botUsername });
+    const isAbortControlMessage =
+      (!isGroup || resolveTelegramMessageAddress(msg, ctx.me ?? {}) !== undefined) &&
+      isAbortRequestText(messageText, { botUsername });
     let abortControlAuthorized: Promise<boolean> | undefined;
     const isAuthorizedAbortControlMessage = () => {
       if (!isAbortControlMessage || !senderId) {
@@ -179,6 +166,7 @@ export function createTelegramInboundProcessing({
 
     if (
       await handleTextFragment({
+        conversationHistory,
         ctx,
         msg,
         chatId,
@@ -187,7 +175,6 @@ export function createTelegramInboundProcessing({
         isAbortControlMessage,
         isAuthorizedAbortControlMessage,
         promptContextMinTimestampMs,
-        promptContextAmbientWatermark,
         dispatchDedupeClaims,
         channelIngressResolver,
       })
@@ -195,191 +182,177 @@ export function createTelegramInboundProcessing({
       return { kind: "buffered", buffer: "text-fragment" };
     }
 
-    if (
-      handleMediaGroup({
-        authorizationCfg,
-        ctx,
-        msg,
-        chatId,
-        isGroup,
-        isForum,
-        threadSpec,
-        storeAllowFrom,
-        senderId,
-        effectiveGroupAllow,
-        effectiveDmAllow,
-        groupConfig,
-        topicConfig,
-        promptContextMinTimestampMs,
-        promptContextAmbientWatermark,
-        dispatchDedupeClaims,
-        channelIngressResolvers: [channelIngressResolver],
-      })
-    ) {
-      return { kind: "buffered", buffer: "media-group" };
-    }
+    return await withMediaGroupReceipt(
+      { ...params, channelIngressResolvers: [channelIngressResolver] },
+      async (recordAlbumMedia): Promise<TelegramInboundDisposition> => {
+        const nativeMedia = resolveTelegramPrimaryMedia(msg);
+        const shouldShowMediaWarning =
+          Boolean(nativeMedia) && !msg.media_group_id && (await shouldWarnOnMediaFailure(params));
+        const mediaRuntime = resolveMediaRuntime();
+        let media: Awaited<ReturnType<typeof resolveMedia>> = null;
+        let unavailable: TelegramMediaRef["unavailable"];
+        try {
+          media = await resolveMedia({ ctx, maxBytes: mediaMaxBytes, ...mediaRuntime });
+          if (mediaRuntime.abortSignal?.aborted) {
+            const abortError =
+              mediaRuntime.abortSignal.reason ??
+              new Error("telegram media hydration owner aborted");
+            if (msg.media_group_id) {
+              throw abortError;
+            }
+            recordTelegramMessageProcessingResult({ kind: "failed-retryable", error: abortError });
+            releaseDispatchDedupeClaims(dispatchDedupeClaims, abortError);
+            return { kind: "ignored" };
+          }
+          if (media) {
+            await recordMessageResolvedMedia({ msg, media, botUserId: ctx.me?.id });
+          }
+        } catch (mediaErr) {
+          if (
+            msg.media_group_id &&
+            (mediaRuntime.abortSignal?.aborted ||
+              isDurablyRetryableInboundMediaError(mediaErr) ||
+              (!(mediaErr instanceof MediaFetchError) && !isMediaSizeLimitError(mediaErr)))
+          ) {
+            throw mediaErr;
+          }
+          const replayingSpooledUpdate = isTelegramSpooledReplayUpdate(ctx.update);
+          const warningThreadParams = buildTelegramThreadParams(threadSpec);
+          if (mediaRuntime.abortSignal?.aborted && isDurablyRetryableInboundMediaError(mediaErr)) {
+            // Abort mid-media-resolution must stay retryable for live updates too;
+            // a clean claim release would settle the update as handled and silently
+            // drop the message during shutdown or deadline cancellation.
+            recordTelegramMessageProcessingResult({ kind: "failed-retryable", error: mediaErr });
+            releaseDispatchDedupeClaims(dispatchDedupeClaims, mediaErr);
+            return { kind: "ignored" };
+          }
+          if (isMediaSizeLimitError(mediaErr)) {
+            const limitMb =
+              mediaErr instanceof TelegramBotApiFileTooLargeError
+                ? Math.min(mediaErr.limitMb, Math.round(mediaMaxBytes / (1024 * 1024)))
+                : Math.round(mediaMaxBytes / (1024 * 1024));
+            unavailable = { reason: "oversize", limitMb };
+            if (sendOversizeWarning && shouldShowMediaWarning) {
+              await withTelegramApiErrorLogging({
+                operation: "sendMessage",
+                runtime,
+                fn: () =>
+                  bot.api.sendMessage(chatId, `⚠️ File too large. Maximum size is ${limitMb}MB.`, {
+                    ...warningThreadParams,
+                    reply_parameters: {
+                      message_id: msg.message_id,
+                      allow_sending_without_reply: true,
+                    },
+                  }),
+              }).catch(() => {});
+            }
+            logger.warn({ chatId, error: String(mediaErr) }, oversizeLogMessage);
+          } else {
+            logger.warn({ chatId, error: String(mediaErr) }, "media fetch failed");
+            const retryable = isDurablyRetryableInboundMediaError(mediaErr);
+            if (retryable && replayingSpooledUpdate) {
+              recordTelegramMessageProcessingResult({ kind: "failed-retryable", error: mediaErr });
+              releaseDispatchDedupeClaims(dispatchDedupeClaims, mediaErr);
+              return { kind: "ignored" };
+            }
+            unavailable = { reason: "download-failed" };
+            if (shouldShowMediaWarning) {
+              await withTelegramApiErrorLogging({
+                operation: "sendMessage",
+                runtime,
+                fn: () =>
+                  bot.api.sendMessage(chatId, "⚠️ Failed to download media. Please try again.", {
+                    ...warningThreadParams,
+                    reply_parameters: {
+                      message_id: msg.message_id,
+                      allow_sending_without_reply: true,
+                    },
+                  }),
+              }).catch(() => {});
+            }
+          }
+        }
 
-    const mediaDisposition = await resolveUnaddressedGroupMediaDisposition({
-      authorizationCfg,
-      ctx,
-      msg,
-      chatId,
-      isGroup,
-      isForum,
-      threadSpec,
-      senderId,
-      effectiveGroupAllow,
-      effectiveDmAllow,
-      groupConfig,
-      topicConfig,
-    });
-    if (mediaDisposition === "skip") {
-      releaseDispatchDedupeClaims(dispatchDedupeClaims);
-      return { kind: "ignored" };
-    }
-
-    const nativeMedia = resolveTelegramPrimaryMedia(msg);
-    const mediaRuntime = resolveMediaRuntime();
-    let media: Awaited<ReturnType<typeof resolveMedia>> = null;
-    let unavailable: TelegramMediaRef["unavailable"];
-    try {
-      media = await resolveMedia({
-        ctx,
-        maxBytes: mediaMaxBytes,
-        ...mediaRuntime,
-      });
-      if (mediaRuntime.abortSignal?.aborted) {
-        const abortError =
-          mediaRuntime.abortSignal.reason ?? new Error("telegram media hydration owner aborted");
-        recordTelegramMessageProcessingResult({ kind: "failed-retryable", error: abortError });
-        releaseDispatchDedupeClaims(dispatchDedupeClaims, abortError);
-        return { kind: "ignored" };
-      }
-      if (media) {
-        await recordMessageResolvedMedia({ msg, media, botUserId: ctx.me?.id });
-      }
-    } catch (mediaErr) {
-      const replayingSpooledUpdate = isTelegramSpooledReplayUpdate(ctx.update);
-      const warningThreadParams = buildTelegramThreadParams(threadSpec);
-      if (mediaRuntime.abortSignal?.aborted && isDurablyRetryableInboundMediaError(mediaErr)) {
-        // Abort mid-media-resolution must stay retryable for live updates too;
-        // a clean claim release would settle the update as handled and silently
-        // drop the message during shutdown or deadline cancellation.
-        recordTelegramMessageProcessingResult({ kind: "failed-retryable", error: mediaErr });
-        releaseDispatchDedupeClaims(dispatchDedupeClaims, mediaErr);
-        return { kind: "ignored" };
-      }
-      if (isMediaSizeLimitError(mediaErr)) {
-        const limitMb =
-          mediaErr instanceof TelegramBotApiFileTooLargeError
-            ? Math.min(mediaErr.limitMb, Math.round(mediaMaxBytes / (1024 * 1024)))
-            : Math.round(mediaMaxBytes / (1024 * 1024));
-        unavailable = { reason: "oversize", limitMb };
-        if (sendOversizeWarning && mediaDisposition !== "silent-ingest") {
-          await withTelegramApiErrorLogging({
-            operation: "sendMessage",
-            runtime,
-            fn: () =>
-              bot.api.sendMessage(chatId, `⚠️ File too large. Maximum size is ${limitMb}MB.`, {
-                ...warningThreadParams,
-                reply_parameters: {
-                  message_id: msg.message_id,
-                  allow_sending_without_reply: true,
-                },
+        const allMedia: TelegramMediaRef[] = nativeMedia
+          ? [
+              media
+                ? {
+                    path: media.path,
+                    contentType: media.contentType,
+                    ...(media.fileName ? { fileName: media.fileName } : {}),
+                    kind: media.kind,
+                    stickerMetadata: media.stickerMetadata,
+                    sourceMessageId: String(msg.message_id),
+                  }
+                : { kind: nativeMedia.kind, unavailable, sourceMessageId: String(msg.message_id) },
+            ]
+          : [];
+        if (conversationHistory && allMedia.length > 0) {
+          await recordTelegramConversationMedia(
+            conversationHistory,
+            String(msg.message_id),
+            allMedia,
+          );
+        }
+        if (recordAlbumMedia(allMedia)) {
+          return { kind: "buffered", buffer: "media-group" };
+        }
+        const conversationKey = buildTelegramInboundDebounceConversationKey({
+          chatId,
+          threadSpec,
+        });
+        const debounceLane = resolveTelegramDebounceLane(msg);
+        const debounceKey = senderId
+          ? buildTelegramInboundDebounceKey({
+              accountId,
+              conversationKey,
+              senderId,
+              debounceLane,
+            })
+          : null;
+        if (senderId && (await isAuthorizedAbortControlMessage())) {
+          for (const lane of ["default", "forward"] as const) {
+            inboundDebouncer.cancelKey(
+              buildTelegramInboundDebounceKey({
+                accountId,
+                conversationKey,
+                senderId,
+                debounceLane: lane,
               }),
-          }).catch(() => {});
+            );
+          }
         }
-        logger.warn({ chatId, error: String(mediaErr) }, oversizeLogMessage);
-      } else {
-        logger.warn({ chatId, error: String(mediaErr) }, "media fetch failed");
-        const retryable = isDurablyRetryableInboundMediaError(mediaErr);
-        if (retryable && replayingSpooledUpdate) {
-          recordTelegramMessageProcessingResult({ kind: "failed-retryable", error: mediaErr });
-          releaseDispatchDedupeClaims(dispatchDedupeClaims, mediaErr);
-          return { kind: "ignored" };
-        }
-        unavailable = { reason: "download-failed" };
-        if (mediaDisposition !== "silent-ingest") {
-          await withTelegramApiErrorLogging({
-            operation: "sendMessage",
-            runtime,
-            fn: () =>
-              bot.api.sendMessage(chatId, "⚠️ Failed to download media. Please try again.", {
-                ...warningThreadParams,
-                reply_parameters: {
-                  message_id: msg.message_id,
-                  allow_sending_without_reply: true,
-                },
-              }),
-          }).catch(() => {});
-        }
-      }
-    }
-
-    const allMedia = nativeMedia
-      ? [
-          media
-            ? {
-                path: media.path,
-                contentType: media.contentType,
-                ...(media.fileName ? { fileName: media.fileName } : {}),
-                kind: media.kind,
-                stickerMetadata: media.stickerMetadata,
-              }
-            : { kind: nativeMedia.kind, unavailable },
-        ]
-      : [];
-    const conversationKey = buildTelegramInboundDebounceConversationKey({
-      chatId,
-      threadSpec,
-    });
-    const debounceLane = resolveTelegramDebounceLane(msg);
-    const debounceKey = senderId
-      ? buildTelegramInboundDebounceKey({
-          accountId,
-          conversationKey,
-          senderId,
+        const debounceEntry: TelegramDebounceEntry = {
+          conversationHistory,
+          ctx,
+          msg,
+          allMedia,
+          storeAllowFrom,
+          receivedAtMs: Date.now(),
+          debounceKey: isAbortControlMessage ? null : debounceKey,
           debounceLane,
-        })
-      : null;
-    if (senderId && (await isAuthorizedAbortControlMessage())) {
-      for (const lane of ["default", "forward"] as const) {
-        inboundDebouncer.cancelKey(
-          buildTelegramInboundDebounceKey({
-            accountId,
-            conversationKey,
-            senderId,
-            debounceLane: lane,
-          }),
+          botUsername,
+          threadSpec,
+          ...promptContextBoundaryOptions(promptContextMinTimestampMs),
+          dispatchDedupeClaims,
+          channelIngressResolvers: [channelIngressResolver],
+        };
+        const shouldBufferDebounce = Boolean(
+          debounceEntry.debounceKey &&
+          resolveTelegramDebounceEntryMs(debounceEntry) > 0 &&
+          shouldDebounceTelegramEntry(debounceEntry),
         );
-      }
-    }
-    const debounceEntry: TelegramDebounceEntry = {
-      ctx,
-      msg,
-      allMedia,
-      storeAllowFrom,
-      receivedAtMs: Date.now(),
-      debounceKey: isAbortControlMessage ? null : debounceKey,
-      debounceLane,
-      botUsername,
-      threadSpec,
-      ...promptContextBoundaryOptions(promptContextMinTimestampMs, promptContextAmbientWatermark),
-      dispatchDedupeClaims,
-      channelIngressResolvers: [channelIngressResolver],
-    };
-    const shouldBufferDebounce = Boolean(
-      debounceEntry.debounceKey &&
-      resolveTelegramDebounceEntryMs(debounceEntry) > 0 &&
-      shouldDebounceTelegramEntry(debounceEntry),
+        if (shouldBufferDebounce) {
+          debounceEntry.spooledReplayParticipant = createSpooledReplayParticipantForBufferedWork(
+            `inbound-debounce:${debounceEntry.debounceKey}`,
+          );
+        }
+        await inboundDebouncer.enqueue(debounceEntry);
+        return shouldBufferDebounce
+          ? { kind: "buffered", buffer: "debounce" }
+          : { kind: "processed" };
+      },
     );
-    if (shouldBufferDebounce) {
-      debounceEntry.spooledReplayParticipant = createSpooledReplayParticipantForBufferedWork(
-        `inbound-debounce:${debounceEntry.debounceKey}`,
-      );
-    }
-    await inboundDebouncer.enqueue(debounceEntry);
-    return shouldBufferDebounce ? { kind: "buffered", buffer: "debounce" } : { kind: "processed" };
   };
 
   return { processInboundMessage };

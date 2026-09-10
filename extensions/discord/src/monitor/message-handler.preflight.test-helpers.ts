@@ -102,8 +102,6 @@ export function createDiscordPreflightArgs(params: {
     token: "token",
     runtime: {} as import("openclaw/plugin-sdk/runtime-env").RuntimeEnv,
     botUserId: params.botUserId ?? "openclaw-bot",
-    guildHistories: new Map(),
-    historyLimit: 0,
     mediaMaxBytes: 1_000_000,
     textLimit: 2_000,
     replyToMode: "all",

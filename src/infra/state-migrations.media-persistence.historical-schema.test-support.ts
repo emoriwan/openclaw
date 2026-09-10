@@ -40,11 +40,11 @@ function removeSchemaRange(sql: string, startMarker: string, endMarker?: string)
 
 /** Exact schema bytes from 509a5f0373764, derived from current SQL with later additions removed. */
 export function historicalV15AgentSchemaSql(): string {
-  const withoutPendingInputs = removeSchemaRange(
+  const withoutTurnInputs = removeSchemaRange(
     OPENCLAW_AGENT_SCHEMA_SQL,
-    "\n-- Accepted input stays outside the active transcript until its exact turn owns execution.",
+    "\nCREATE TABLE IF NOT EXISTS conversation_history (",
   );
-  let sql = restoreHistoricalAgentLeaseSchema(withoutPendingInputs)
+  let sql = restoreHistoricalAgentLeaseSchema(withoutTurnInputs)
     .replace("  entry_valid INTEGER NOT NULL DEFAULT 0 CHECK (entry_valid IN (-1, 0, 1)),\n", "")
     .replace("  project_id TEXT,\n", "")
     .replace("  route_context_json TEXT,\n", "")

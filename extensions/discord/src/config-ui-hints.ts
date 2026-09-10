@@ -1,6 +1,9 @@
 import { createChannelConfigUiHints } from "openclaw/plugin-sdk/channel-core";
 import type { ChannelConfigUiHint } from "openclaw/plugin-sdk/channel-core";
 
+const nativeGroupAddressingHelp =
+  "Discord groups require a native bot mention or reply. This legacy setting remains accepted but cannot enable automatic replies to ordinary group chatter.";
+
 export const discordChannelConfigUiHints = {
   "": {
     label: "Discord",
@@ -10,11 +13,6 @@ export const discordChannelConfigUiHints = {
     channelLabel: "Discord",
     dmPolicy: { channelKey: "discord" },
     configWrites: true,
-    mentionPatterns: {
-      targetDescription: "Discord channel IDs",
-      policyNote: "Native Discord @mentions still trigger even when regex patterns are denied.",
-      denyNote: "Native @mentions still trigger.",
-    },
     nativeCommands: true,
     streaming: {
       "": 'Discord preview streaming is off by default. Set mode to "partial", "block", or "progress" to opt in. Run openclaw doctor --fix to migrate legacy keys.',
@@ -37,6 +35,25 @@ export const discordChannelConfigUiHints = {
     },
     progress: { includeCommentary: true },
   }),
+  historyLimit: {
+    label: "Discord Group History Limit (legacy)",
+    help: "Accepted for compatibility. Unread group text is retained until a native bot mention or reply consumes it. This setting no longer limits Discord group history.",
+  },
+  "guilds.*.requireMention": {
+    label: "Discord Guild Require Mention (legacy)",
+    help: nativeGroupAddressingHelp,
+  },
+  "guilds.*.channels.*.requireMention": {
+    label: "Discord Channel Require Mention (legacy)",
+    help: nativeGroupAddressingHelp,
+  },
+  mentionPatterns: {
+    label: "Discord Mention Patterns (legacy)",
+    help: nativeGroupAddressingHelp,
+  },
+  "mentionPatterns.mode": { help: nativeGroupAddressingHelp },
+  "mentionPatterns.allowIn": { help: nativeGroupAddressingHelp },
+  "mentionPatterns.denyIn": { help: nativeGroupAddressingHelp },
   joinIntro: {
     label: "Discord Guild Join Introduction",
     help: "Post one brief, room-specific introduction when the bot joins an allowed Discord guild (default: true). Account settings override the channel-wide setting.",
@@ -83,7 +100,7 @@ export const discordChannelConfigUiHints = {
   },
   "intents.messageContent": {
     label: "Discord Message Content Intent",
-    help: "Request the privileged Message Content intent (default: true). Set false only for mention-only guild operation when Discord cannot grant the intent; DMs and explicit mentions still include message content.",
+    help: "Request the privileged Message Content intent (default: true). Ordinary group text needs this intent for observed history. Without it, Discord supplies content only for supported cases such as DMs and explicit bot mentions.",
   },
   "intents.presence": {
     label: "Discord Presence Intent",

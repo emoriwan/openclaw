@@ -12,6 +12,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MediaFact } from "../../media/media-facts.js";
 import { saveMediaBuffer } from "../../media/store.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import type { WorkerWorkspaceCommand } from "./tunnel-contract.js";
@@ -53,6 +54,55 @@ describe("cloud attachment transfer confinement", () => {
       input: { timeoutMs: 5_000, media: [{ path: saved.path, contentType: "application/pdf" }] },
     };
   }
+
+  it.each([false, true])(
+    "keeps expired originals mandatory unless contextOnly=%s",
+    async (contextOnly) => {
+      const { remote, input } = await fixture();
+      const source = input.media[0]!;
+      await rm(source.path);
+      const runWorkspaceCommand = vi.fn();
+      const operation = prepareWorkerTurnAttachments({
+        turn: {
+          ...input,
+          media: [{ ...source, ...(contextOnly ? { contextOnly: true as const } : {}) }],
+        },
+        remoteWorkspaceDir: remote,
+        tunnel: { runWorkspaceCommand },
+        assertCurrent: () => {},
+      });
+      if (contextOnly) {
+        await expect(operation).resolves.toContain("Earlier attachments are unavailable");
+      } else {
+        await expect(operation).rejects.toThrow();
+      }
+      expect(runWorkspaceCommand).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reserves transfer capacity for current attachments before optional background files", async () => {
+    const { remote, input, execute, bytes } = await fixture();
+    const background: MediaFact[] = [];
+    for (let index = 0; index < 16; index++) {
+      const saved = await saveMediaBuffer(
+        Buffer.from(`background-${index}`),
+        "text/plain",
+        "inbound",
+      );
+      background.push({ path: saved.path, fileName: `background-${index}.txt`, contextOnly: true });
+    }
+    const note = await prepareWorkerTurnAttachments({
+      turn: { ...input, media: [...background, { ...input.media[0], fileName: "current.pdf" }] },
+      remoteWorkspaceDir: remote,
+      tunnel: { runWorkspaceCommand: execute },
+      assertCurrent: () => {},
+    });
+    const [directory] = await readdir(remote);
+    expect(await readdir(path.join(remote, directory!))).toHaveLength(16);
+    expect(await readFile(path.join(remote, directory!, "1-current.pdf"))).toEqual(bytes);
+    expect(note).toContain("background-15.txt");
+    expect(note).toContain("attachment transfer limit");
+  });
 
   it("removes incomplete files after a checksum failure without changing other workspace files", async () => {
     const { remote, execute, input } = await fixture();
@@ -104,30 +154,38 @@ describe("cloud attachment transfer confinement", () => {
     expect(await readFile(path.join(outside, "keep.txt"), "utf8")).toBe("outside");
   });
 
-  it("stops after claim loss and never uses a stale claim for cleanup", async () => {
-    const { remote, execute, input } = await fixture();
-    let current = true;
-    const runWorkspaceCommand = vi.fn(async (command: WorkerWorkspaceCommand) => {
-      const result = await execute(command);
-      current = false;
-      return result;
-    });
-    await expect(
-      prepareWorkerTurnAttachments({
-        turn: input,
-        remoteWorkspaceDir: remote,
-        tunnel: { runWorkspaceCommand },
-        assertCurrent: () => {
-          if (!current) {
-            throw new Error("lost claim");
-          }
-        },
-      }),
-    ).rejects.toThrow("lost claim");
-    expect(runWorkspaceCommand).toHaveBeenCalledOnce();
-    const [directory] = await readdir(remote);
-    expect(await readdir(path.join(remote, directory!))).toEqual([]);
-  });
+  it.each([false, true])(
+    "stops after claim loss for current or context-only files (%s)",
+    async (contextOnly) => {
+      const { remote, execute, input } = await fixture();
+      let current = true;
+      const runWorkspaceCommand = vi.fn(async (command: WorkerWorkspaceCommand) => {
+        const result = await execute(command);
+        current = false;
+        return result;
+      });
+      await expect(
+        prepareWorkerTurnAttachments({
+          turn: {
+            ...input,
+            media: input.media.map((fact) =>
+              Object.assign(fact, contextOnly ? { contextOnly: true as const } : {}),
+            ),
+          },
+          remoteWorkspaceDir: remote,
+          tunnel: { runWorkspaceCommand },
+          assertCurrent: () => {
+            if (!current) {
+              throw new Error("lost claim");
+            }
+          },
+        }),
+      ).rejects.toThrow("lost claim");
+      expect(runWorkspaceCommand).toHaveBeenCalledOnce();
+      const [directory] = await readdir(remote);
+      expect(await readdir(path.join(remote, directory!))).toEqual([]);
+    },
+  );
 
   it.each(["path", "url"] as const)(
     "reports unavailable local %s attachments without reading arbitrary host files",

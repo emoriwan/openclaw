@@ -32,11 +32,17 @@ export class AgentHarnessSessionSupersededError extends Error {
 export class AgentHarnessPreflightError extends Error {
   /** Opts fallback into skipping only candidates owned by the selected harness. */
   readonly scope?: "harness";
+  /** Safe, actionable copy that may be shown without verbose error details. */
+  readonly userMessage?: string;
 
-  constructor(message: string, options?: ErrorOptions & { scope?: "harness" }) {
+  constructor(
+    message: string,
+    options?: ErrorOptions & { scope?: "harness"; userMessage?: string },
+  ) {
     super(message, options);
     this.name = "AgentHarnessPreflightError";
     this.scope = options?.scope;
+    this.userMessage = options?.userMessage;
   }
 }
 

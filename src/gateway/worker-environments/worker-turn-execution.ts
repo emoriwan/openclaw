@@ -339,9 +339,7 @@ export async function executeWorkerTurn(
               : {}),
             modelRef,
             inferenceOptions: reasoning ? { reasoning } : {},
-            ...(turn.extraSystemPrompt === undefined
-              ? {}
-              : { systemPrompt: turn.extraSystemPrompt }),
+            ...(media.systemPrompt === undefined ? {} : { systemPrompt: media.systemPrompt }),
             initialMessages: windowedMessages,
             transcript: {
               baseLeafId,

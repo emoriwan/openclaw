@@ -1,6 +1,5 @@
 // Telegram plugin module recovers dispatch routing and group-history context.
 import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
-import { createChannelHistoryWindow } from "openclaw/plugin-sdk/reply-history";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import type { TelegramMessageContext } from "./bot-message-context.js";
@@ -11,12 +10,6 @@ import {
   buildTypingThreadParams,
   type TelegramThreadSpec,
 } from "./bot/helpers.js";
-import {
-  isTelegramHistoryEntryAfterAmbientWatermark,
-  mergeTelegramGroupHistoryPromptContext,
-  retainTelegramGroupHistoryPromptContext,
-  selectTelegramGroupHistoryAfterLastSelf,
-} from "./group-history-window.js";
 
 const TELEGRAM_GENERAL_TOPIC_ID = 1;
 
@@ -110,52 +103,17 @@ function buildRecoveredTelegramChatActionSender(params: {
   };
 }
 
-function migrateRecoveredTelegramGroupHistory(params: {
-  context: TelegramMessageContext;
-  recoveredHistoryKey?: string;
-}) {
-  const originalHistoryKey = params.context.historyKey;
-  const recoveredHistoryKey = params.recoveredHistoryKey;
-  if (
-    !params.context.isGroup ||
-    !originalHistoryKey ||
-    !recoveredHistoryKey ||
-    originalHistoryKey === recoveredHistoryKey ||
-    params.context.historyLimit <= 0
-  ) {
-    return;
-  }
-  // Topic recovery mutates the raw in-memory buffer before any prompt is built;
-  // prompt readers apply the ambient transcript watermark after recovery.
-  const originalEntries = params.context.groupHistories.get(originalHistoryKey);
-  if (!originalEntries?.length) {
-    return;
-  }
-  const messageId = params.context.ctxPayload.MessageSid;
-  const rawBody = params.context.ctxPayload.RawBody;
-  const entryIndex = originalEntries.findLastIndex((entry) => {
-    if (messageId && entry.messageId === messageId) {
-      return true;
-    }
-    return !messageId && typeof rawBody === "string" && entry.body === rawBody;
-  });
-  if (entryIndex === -1) {
-    return;
-  }
-  const [entry] = originalEntries.splice(entryIndex, 1);
-  if (!entry) {
-    return;
-  }
-  createChannelHistoryWindow({ historyMap: params.context.groupHistories }).record({
-    historyKey: recoveredHistoryKey,
-    limit: params.context.historyLimit,
-    entry,
-  });
-}
-
 export function resolveDispatchTelegramContext(params: {
   context: TelegramMessageContext;
 }): TelegramMessageContext {
+  if (params.context.ctxPayload.ConversationHistory) {
+    // Captured context belongs to the native room/thread chosen at intake.
+    // A session-key hint cannot move those messages into another conversation.
+    return normalizeDispatchTelegramThreadPayload({
+      context: params.context,
+      threadSpec: params.context.threadSpec,
+    });
+  }
   const threadSpec = resolveDispatchTelegramThreadSpec({
     chatId: params.context.chatId,
     ctxPayload: params.context.ctxPayload,
@@ -182,55 +140,6 @@ export function resolveDispatchTelegramContext(params: {
   const recoveredHistoryKey = params.context.isGroup
     ? buildTelegramGroupPeerId(params.context.chatId, threadSpec)
     : params.context.historyKey;
-  const recoveredHistoryEntries =
-    recoveredHistoryKey && params.context.historyLimit > 0
-      ? (params.context.groupHistories.get(recoveredHistoryKey) ?? [])
-          .filter((entry) =>
-            isTelegramHistoryEntryAfterAmbientWatermark(
-              entry,
-              params.context.ctxPayload.AmbientTranscriptPreviousMessageId
-                ? {
-                    messageId: params.context.ctxPayload.AmbientTranscriptPreviousMessageId,
-                    ...(params.context.ctxPayload.AmbientTranscriptPreviousTimestampMs !== undefined
-                      ? {
-                          timestampMs:
-                            params.context.ctxPayload.AmbientTranscriptPreviousTimestampMs,
-                        }
-                      : {}),
-                  }
-                : undefined,
-            ),
-          )
-          .slice(-params.context.historyLimit)
-      : [];
-  const recoveredWatermarkedHistoryEntries = selectTelegramGroupHistoryAfterLastSelf(
-    recoveredHistoryEntries,
-  ).slice(-params.context.historyLimit);
-  const recoveredPromptHistoryEntries =
-    params.context.isGroup && recoveredHistoryKey && params.context.historyLimit > 0
-      ? params.context.ctxPayload.InboundEventKind === "room_event"
-        ? recoveredHistoryEntries
-        : recoveredWatermarkedHistoryEntries
-      : [];
-  const recoveredInboundHistory =
-    params.context.isGroup && recoveredHistoryKey && params.context.historyLimit > 0
-      ? recoveredPromptHistoryEntries.length > 0
-        ? recoveredPromptHistoryEntries
-        : undefined
-      : params.context.ctxPayload.InboundHistory;
-  const recoveredPromptContextBase = retainTelegramGroupHistoryPromptContext({
-    promptContext: params.context.ctxPayload.ChannelStructuredContext ?? [],
-    entries: recoveredPromptHistoryEntries,
-  });
-  const recoveredPromptContext =
-    recoveredPromptHistoryEntries.length > 0
-      ? mergeTelegramGroupHistoryPromptContext({
-          promptContext: recoveredPromptContextBase ?? [],
-          entries: recoveredPromptHistoryEntries,
-        })
-      : recoveredPromptContextBase?.length
-        ? recoveredPromptContextBase
-        : undefined;
   const recoveredSendTyping = buildRecoveredTelegramChatActionSender({
     context: params.context,
     threadId: threadSpec.id,
@@ -241,18 +150,15 @@ export function resolveDispatchTelegramContext(params: {
     threadId: threadSpec.id,
     action: "record_voice",
   });
-  migrateRecoveredTelegramGroupHistory({ context: params.context, recoveredHistoryKey });
   if (threadSpec.id != null) {
     // Keep the admitted payload object intact; replacing it would discard the
     // host-only participant carrier before canonical run admission.
     Object.assign(params.context.ctxPayload, {
       From: recoveredFrom,
-      InboundHistory: recoveredInboundHistory,
       MessageThreadId: threadSpec.id,
       OriginatingTo: recoveredRoutingTarget,
       To: recoveredRoutingTarget,
       TransportThreadId: threadSpec.id,
-      ChannelStructuredContext: recoveredPromptContext,
     });
   }
   const recovered = {

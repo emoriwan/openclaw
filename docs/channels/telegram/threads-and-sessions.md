@@ -18,7 +18,7 @@ How forum topics map to sessions, agents, and ACP bindings.
 
     General topic (`threadId=1`) is a special case: message sends omit `message_thread_id` (Telegram rejects `sendMessage(...thread_id=1)` with "thread not found"), but typing actions still include `message_thread_id` (empirically required for the typing indicator to appear).
 
-    Topic entries inherit group settings unless overridden (`requireMention`, `allowFrom`, `skills`, `systemPrompt`, `enabled`, `groupPolicy`). `agentId` is topic-only and does not inherit from group defaults. `topics."*"` sets defaults for every topic in that group; exact topic IDs still win over `"*"`.
+    Topic entries inherit group settings unless overridden (`allowFrom`, `skills`, `systemPrompt`, `enabled`, `groupPolicy`). Every group/topic request requires a native bot mention or reply. Unread text is retained separately for each native conversation and agent, including across restarts. `/new` clears unread history through the reset request; later messages remain unread. `agentId` is topic-only and does not inherit from group defaults. `topics."*"` sets defaults for every topic in that group; exact topic IDs still win over `"*"`.
 
     **Per-topic agent routing**: each topic can route to a different agent via `agentId` in the topic config, giving it its own workspace, memory, and session:
 

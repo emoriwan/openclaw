@@ -36,6 +36,8 @@ type FailoverUserCopyContext = {
 type FailoverBaseCopyRenderer = (context: FailoverUserCopyContext) => string | undefined;
 
 const RATE_LIMIT_ERROR_USER_MESSAGE = "⚠️ API rate limit reached. Please try again later.";
+export const CONTEXT_OVERFLOW_USER_TEXT =
+  "Context overflow: prompt too large for the model. Use /new to start a fresh session; in a group, send it as a reply to this message. You can also use a model with a larger context window.";
 export const AUTH_INVALID_TOKEN_USER_TEXT =
   "Authentication failed (provider returned HTTP 401). " +
   "Your provider token may have expired — try the request again in a moment. " +
@@ -149,8 +151,7 @@ const FAILOVER_REASON_BASE_COPY = {
   timeout: () => "LLM request timed out.",
   tls_certificate: () =>
     "LLM request failed: TLS certificate validation rejected the provider endpoint. Check the endpoint hostname, proxy, and local certificate trust.",
-  context_overflow: () =>
-    "Context overflow: prompt too large for the model. Try /reset (or /new) to start a fresh session, or use a larger-context model.",
+  context_overflow: () => CONTEXT_OVERFLOW_USER_TEXT,
   model_not_found: () =>
     "The selected model was not found by the provider. Check the model id or choose a different model.",
   session_expired: () => "The provider session expired. Start a new session and try again.",

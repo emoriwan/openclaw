@@ -2,36 +2,29 @@ import type { Message } from "grammy/types";
 import { resolveChannelContextVisibilityMode } from "openclaw/plugin-sdk/context-visibility-runtime";
 import { kindFromMime } from "openclaw/plugin-sdk/media-runtime";
 import { danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
-import { evaluateSupplementalContextVisibility } from "openclaw/plugin-sdk/security-runtime";
-import { expandTelegramAllowFromWithAccessGroups } from "./access-groups.js";
+import { createTelegramSupplementalContextChecker } from "./access-groups.js";
 import {
   resolveTelegramAccount,
   resolveTelegramMediaRuntimeOptions,
   type TelegramMediaRuntimeOptions,
 } from "./accounts.js";
-import { firstDefined, isSenderAllowed, normalizeAllowFrom } from "./bot-access.js";
+import { firstDefined } from "./bot-access.js";
 import { hasInboundMedia, resolveInboundMediaFileId } from "./bot-handlers.media.js";
 import {
   buildSyntheticContext,
   buildSyntheticTextMessage,
   createTelegramMessageContextRuntime,
   createTelegramMessageSessionRuntime,
-  formatTelegramAmbientTranscriptBody,
-  latestPromptContextAmbientWatermark,
   latestPromptContextMinTimestampMs,
   normalizePromptContextMinTimestampMs,
   promptContextBoundaryOptions,
-  type ResolvePromptContextAmbientWatermarkParams,
   type ResolveTelegramSessionStateParams,
   type TelegramPromptContextMessageSelection,
   type TelegramSessionState,
 } from "./bot-handlers.message-context.js";
 import type { RegisterTelegramHandlerParams } from "./bot-handlers.types.js";
 import type { TelegramMediaRef } from "./bot-message-context.js";
-import type {
-  TelegramAmbientTranscriptWatermark,
-  TelegramMessageContextOptions,
-} from "./bot-message-context.types.js";
+import type { TelegramMessageContextOptions } from "./bot-message-context.types.js";
 import {
   createTelegramSpooledReplayDeferredParticipant,
   createTelegramSpooledReplayParticipant,
@@ -82,7 +75,6 @@ export interface TelegramMessagePipeline {
   normalizePromptContextMinTimestampMs: typeof normalizePromptContextMinTimestampMs;
   promptContextBoundaryOptions: typeof promptContextBoundaryOptions;
   latestPromptContextMinTimestampMs: typeof latestPromptContextMinTimestampMs;
-  latestPromptContextAmbientWatermark: typeof latestPromptContextAmbientWatermark;
   mergeDispatchDedupeClaims: (
     ...groups: Array<readonly TelegramMessageDispatchReplayClaim[] | undefined>
   ) => TelegramMessageDispatchReplayClaim[];
@@ -109,11 +101,7 @@ export interface TelegramMessagePipeline {
   >;
   buildSyntheticTextMessage: typeof buildSyntheticTextMessage;
   buildSyntheticContext: typeof buildSyntheticContext;
-  formatTelegramAmbientTranscriptBody: typeof formatTelegramAmbientTranscriptBody;
   resolveTelegramSessionState: (params: ResolveTelegramSessionStateParams) => TelegramSessionState;
-  resolvePromptContextAmbientWatermark: (
-    params: ResolvePromptContextAmbientWatermarkParams,
-  ) => TelegramAmbientTranscriptWatermark | undefined;
   recordMessageForReplyChain: (
     msg: Message,
     providerObservedThread?: TelegramThreadSpec,
@@ -206,7 +194,7 @@ export function createTelegramMessagePipeline({
     resolveTelegramGroupConfig,
     telegramDeps,
   });
-  const { resolveTelegramSessionState, resolvePromptContextAmbientWatermark } = sessionRuntime;
+  const { resolveTelegramSessionState } = sessionRuntime;
   const {
     recordMessageForReplyChain,
     recordMessageResolvedMedia,
@@ -504,37 +492,22 @@ export function createTelegramMessagePipeline({
         channel: "telegram",
         accountId,
       });
-      const shouldHydrateReplyMedia = async (
-        node: TelegramCachedMessageNode,
-        index: number,
-      ): Promise<boolean> => {
-        if (!isGroupConversation) {
-          return true;
-        }
-        const expandedAllowFrom = await expandTelegramAllowFromWithAccessGroups({
-          cfg: runtimeCfg,
-          allowFrom: configuredGroupAllowFrom,
-          accountId,
-          senderId: node.senderId,
-        });
-        const effectiveAllow = normalizeAllowFrom(expandedAllowFrom);
-        const senderAllowed = effectiveAllow.hasEntries
-          ? isSenderAllowed({
-              allow: effectiveAllow,
-              senderId: node.senderId,
-              senderUsername: node.senderUsername,
-            })
-          : true;
-        return evaluateSupplementalContextVisibility({
-          mode: contextVisibilityMode,
-          kind: index === 0 ? "quote" : "thread",
-          senderAllowed,
-        }).include;
-      };
+      const shouldIncludeSupplementalContext = createTelegramSupplementalContextChecker({
+        cfg: runtimeCfg,
+        allowFrom: configuredGroupAllowFrom,
+        accountId,
+        isGroup: isGroupConversation,
+        mode: contextVisibilityMode,
+      });
       const { replyMedia, replyChain } = await resolveReplyMediaForChain(
         params.ctx,
         replyChainNodes,
-        shouldHydrateReplyMedia,
+        (node, index) =>
+          shouldIncludeSupplementalContext({
+            kind: index === 0 ? "quote" : "thread",
+            senderId: node.senderId,
+            senderUsername: node.senderUsername,
+          }),
         durableMediaReplay,
         ...spooledReplayParticipants.map((participant) => participant.abortSignal),
         ...(params.spooledReplayAbortSignal ? [params.spooledReplayAbortSignal] : []),
@@ -630,7 +603,6 @@ export function createTelegramMessagePipeline({
     normalizePromptContextMinTimestampMs,
     promptContextBoundaryOptions,
     latestPromptContextMinTimestampMs,
-    latestPromptContextAmbientWatermark,
     mergeDispatchDedupeClaims,
     releaseDispatchDedupeClaims,
     buildFailedProcessingResult,
@@ -640,9 +612,7 @@ export function createTelegramMessagePipeline({
     claimMessageDispatchDedupe,
     buildSyntheticTextMessage,
     buildSyntheticContext,
-    formatTelegramAmbientTranscriptBody,
     resolveTelegramSessionState,
-    resolvePromptContextAmbientWatermark,
     recordMessageForReplyChain,
     recordMessageResolvedMedia,
     resolveCachedMessageThreadSpec,

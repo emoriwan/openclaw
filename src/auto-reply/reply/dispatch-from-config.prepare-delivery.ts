@@ -49,6 +49,9 @@ export async function prepareDispatchDelivery(state: GatherDispatchRequestReadyS
   const sessionEntryWithAcp = currentAcpSession?.entry
     ? { ...currentAcpSession.entry, acp: currentAcpSession.acp }
     : undefined;
+  const hasAcpTranscriptTarget = Boolean(
+    currentAcpSession?.acp && currentAcpSession.entry?.sessionId,
+  );
   const suppressAcpChildUserDelivery = isParentOwnedBackgroundAcpSession(sessionEntryWithAcp);
   const normalizedRouteReplyChannel = normalizeMessageChannel(replyRoute.channel);
   const normalizedProviderChannel = normalizeMessageChannel(ctx.Provider);
@@ -291,6 +294,7 @@ export async function prepareDispatchDelivery(state: GatherDispatchRequestReadyS
       : turnLedger.sendQueued("final", bindingPayload).queued;
   };
   const nextState = extendPreparedDispatchState(state, {
+    hasAcpTranscriptTarget,
     suppressAcpChildUserDelivery,
     normalizedCurrentSurface,
     isInternalWebchatTurn,

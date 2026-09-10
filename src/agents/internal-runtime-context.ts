@@ -27,6 +27,21 @@ export type RuntimeContextFragment = {
   text: string;
 };
 
+export type CurrentInboundPromptContext = {
+  text: string;
+  fragments?: RuntimeContextFragment[];
+  resumableText?: string;
+  promptJoiner?: "\n\n" | "\n" | " ";
+  injectedGoalContexts?: string[];
+};
+
+/** Quoted context must not select native skills or plugins from another sender's turn. */
+export function neutralizeQuotedContextSelectionSigils(text: string): string {
+  return text
+    .replace(/\$(?=[A-Za-z0-9_:-])/gu, "＄")
+    .replaceAll("[@", "[＠");
+}
+
 const LEGACY_INTERNAL_CONTEXT_HEADER =
   ["OpenClaw runtime context (internal):", OPENCLAW_RUNTIME_CONTEXT_NOTICE, ""].join("\n") + "\n";
 

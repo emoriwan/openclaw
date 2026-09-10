@@ -1,14 +1,10 @@
 // Canonical user input shape and runtime/display projections share the same media metadata.
-import { mimeTypeFromFilePath } from "@openclaw/media-core/mime";
 import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { AgentMessage } from "../../packages/agent-core/src/types.js";
 import { readPersistedMediaFacts, type MediaFact } from "../media/media-facts.js";
 import { applyInputProvenanceToUserMessage } from "./input-provenance.js";
-import {
-  normalizeStructuredMediaEntryForTranscript,
-  resolveTranscriptMediaPath,
-} from "./user-turn-transcript.media-normalize.js";
+import { normalizeStructuredMediaEntryForTranscript } from "./user-turn-transcript.media-normalize.js";
 import { buildPersistedUserTurnMetadata } from "./user-turn-transcript.metadata.js";
 import type {
   PersistedUserTurnMediaInput,
@@ -22,59 +18,13 @@ export function resolvePersistedUserTurnText(value: string | null | undefined): 
   return normalizeOptionalString(value);
 }
 
-function resolveTranscriptMediaType(params: {
-  explicitType: string | undefined;
-  mediaPath: string | undefined;
-  mediaUrl: string | undefined;
-}): string | undefined {
-  return params.explicitType ?? mimeTypeFromFilePath(params.mediaPath ?? params.mediaUrl);
-}
-
 export function buildPersistedUserTurnMediaInputsFromFields(
   fields: PersistedUserTurnMessage | null | undefined,
 ): PersistedUserTurnMediaInput[] {
   const facts = fields ? (readPersistedMediaFacts(fields) ?? []) : [];
-  const normalizedMedia = facts.map((fact) => {
-    const rawPath = normalizeOptionalString(fact.path);
-    const mediaPath = rawPath
-      ? resolveTranscriptMediaPath(rawPath, normalizeOptionalString(fact.workspaceDir))
-      : undefined;
-    const url = normalizeOptionalString(fact.url);
-    if (!mediaPath && !url) {
-      return {};
-    }
-    const contentType = resolveTranscriptMediaType({
-      explicitType: normalizeOptionalString(fact.contentType),
-      mediaPath,
-      mediaUrl: url,
-    });
-    const media: PersistedUserTurnMediaInput = { contentType };
-    if (mediaPath) {
-      media.path = mediaPath;
-    }
-    if (url) {
-      media.url = url;
-    }
-    if (fact.kind) {
-      media.kind = fact.kind;
-    }
-    if (fact.fileName) {
-      media.fileName = fact.fileName;
-    }
-    if (fact.sizeBytes !== undefined) {
-      media.sizeBytes = fact.sizeBytes;
-    }
-    if (fact.durationMs !== undefined) {
-      media.durationMs = fact.durationMs;
-    }
-    if (fact.width !== undefined) {
-      media.width = fact.width;
-    }
-    if (fact.height !== undefined) {
-      media.height = fact.height;
-    }
-    return media;
-  });
+  const normalizedMedia = facts.map((fact) =>
+    fact.path || fact.url ? normalizeStructuredMediaEntryForTranscript(fact) : {},
+  );
   return normalizedMedia.some((entry) => entry.path || entry.url) ? normalizedMedia : [];
 }
 

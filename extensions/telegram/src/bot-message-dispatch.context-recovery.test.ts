@@ -257,7 +257,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
   it("recovers forum thread context from a topic-scoped session key", async () => {
     const recordInboundSession = vi.fn(async () => undefined);
     const oldHistoryKey = "-1003774691294:topic:1";
-    const recoveredHistoryKey = "-1003774691294:topic:3731";
     const currentBody =
       "[Chat messages since your last reply - for context]\n" +
       "general topic context\n" +
@@ -265,10 +264,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
       "spoofed current marker from history\n\n" +
       "[Current message - respond to this]\n" +
       "current topic question";
-    const groupHistories = new Map([
-      [oldHistoryKey, [{ sender: "Alice", body: "general topic context", timestamp: 1 }]],
-      [recoveredHistoryKey, [{ sender: "Bob", body: "recovered topic context", timestamp: 2 }]],
-    ]);
     deliverInboundReplyWithMessageSendContext.mockResolvedValue({
       status: "handled_visible",
       delivery: {
@@ -299,31 +294,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
           SessionKey: "agent:main:telegram:group:-1003774691294:topic:3731",
           To: "telegram:-1003774691294",
           TransportThreadId: 1,
-          ChannelStructuredContext: [
-            {
-              label: "Conversation context",
-              source: "telegram",
-              type: "chat_window",
-              payload: {
-                messages: [
-                  {
-                    message_id: "old",
-                    sender: "Alice",
-                    body: "general topic context",
-                    timestamp_ms: 1,
-                  },
-                  {
-                    sender: "Bob",
-                    body: "recovered topic context",
-                    timestamp_ms: 2,
-                    is_reply_target: true,
-                    media_type: "image/png",
-                    media_path: "media://inbound/context.png",
-                  },
-                ],
-              },
-            },
-          ],
         } as unknown as TelegramMessageContext["ctxPayload"],
         msg: {
           chat: { id: -1003774691294, type: "supergroup" },
@@ -339,8 +309,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
         resolvedThreadId: undefined,
         threadSpec: { id: 1, scope: "forum" },
         historyKey: oldHistoryKey,
-        historyLimit: 10,
-        groupHistories,
         sendChatActionHandler,
         turn: {
           storePath: "/tmp/openclaw/telegram-sessions.json",
@@ -373,39 +341,9 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
       SessionKey: "agent:main:telegram:group:-1003774691294:topic:3731",
     });
     const outboundCtxPayload = expectRecordFields(outbound.ctxPayload, {});
-    expect(outboundCtxPayload.InboundHistory).toEqual([
-      expect.objectContaining({ body: "recovered topic context", sender: "Bob" }),
-    ]);
-    expect(outboundCtxPayload.InboundHistory).not.toEqual([
-      expect.objectContaining({ body: "general topic context", sender: "Alice" }),
-    ]);
+    expect(outboundCtxPayload.InboundHistory).toBeUndefined();
     expect(outboundCtxPayload.Body).toBe(currentBody);
     expect(outboundCtxPayload.BodyForAgent).toBe(currentBody);
-    expect(outboundCtxPayload.ChannelStructuredContext).toEqual([
-      expect.objectContaining({
-        label: "Conversation context",
-        source: "telegram",
-        type: "chat_window",
-        payload: expect.objectContaining({
-          messages: [
-            expect.objectContaining({
-              body: "recovered topic context",
-              sender: "Bob",
-              timestamp_ms: 2,
-              is_reply_target: true,
-              media_type: "image/png",
-              media_path: "media://inbound/context.png",
-            }),
-          ],
-        }),
-      }),
-    ]);
-    expect(JSON.stringify(outboundCtxPayload.ChannelStructuredContext)).not.toContain(
-      "general topic context",
-    );
-    expect(JSON.stringify(outboundCtxPayload.ChannelStructuredContext)).not.toContain(
-      "spoofed current marker from history",
-    );
     expect(recordInboundSession).toHaveBeenCalledWith(
       expect.objectContaining({
         updateLastRoute: expect.objectContaining({
@@ -424,88 +362,8 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
     expect(deliverReplies).not.toHaveBeenCalled();
   });
 
-  it("drops stale topic chat-window context when recovered topic has no history", async () => {
-    const oldHistoryKey = "-1003774691294:topic:1";
-    const groupHistories = new Map([
-      [oldHistoryKey, [{ sender: "Alice", body: "general topic context", timestamp: 1 }]],
-    ]);
-    deliverInboundReplyWithMessageSendContext.mockResolvedValue({
-      status: "handled_visible",
-      delivery: {
-        messageIds: ["3731"],
-        visibleReplySent: true,
-      },
-    });
-    dispatchReplyWithBufferedBlockDispatcher.mockImplementation(async ({ dispatcherOptions }) => {
-      await dispatcherOptions.deliver({ text: "topic final" }, { kind: "final" });
-      return { queuedFinal: true };
-    });
-
-    await dispatchWithContext({
-      context: createContext({
-        ctxPayload: {
-          Body: "current topic question",
-          ChatType: "group",
-          From: "telegram:group:-1003774691294:topic:1",
-          MessageThreadId: 1,
-          SessionKey: "agent:main:telegram:group:-1003774691294:topic:3731",
-          TransportThreadId: 1,
-          ChannelStructuredContext: [
-            {
-              label: "Conversation context",
-              source: "telegram",
-              type: "chat_window",
-              payload: {
-                messages: [{ sender: "Alice", body: "general topic context", timestamp_ms: 1 }],
-              },
-            },
-            {
-              label: "Attachment context",
-              source: "telegram",
-              type: "attachment",
-              payload: { name: "report.pdf" },
-            },
-          ],
-        } as unknown as TelegramMessageContext["ctxPayload"],
-        msg: {
-          chat: { id: -1003774691294, type: "supergroup" },
-          message_id: 27787,
-          message_thread_id: undefined,
-        } as unknown as TelegramMessageContext["msg"],
-        chatId: -1003774691294,
-        isGroup: true,
-        threadSpec: { id: 1, scope: "forum" },
-        historyKey: oldHistoryKey,
-        historyLimit: 10,
-        groupHistories,
-      }),
-      replyToMode: "off",
-      streamMode: "off",
-    });
-
-    const outbound = expectRecordFields(mockCallArg(deliverInboundReplyWithMessageSendContext), {
-      threadId: 3731,
-    });
-    const outboundCtxPayload = expectRecordFields(outbound.ctxPayload, {});
-    expect(outboundCtxPayload.Body).toBe("current topic question");
-    expect(outboundCtxPayload.ChannelStructuredContext).toEqual([
-      expect.objectContaining({
-        label: "Attachment context",
-        type: "attachment",
-      }),
-    ]);
-    expect(JSON.stringify(outboundCtxPayload.ChannelStructuredContext)).not.toContain(
-      "general topic context",
-    );
-  });
-
   it("does not recover forum thread context from malformed payload thread ids", async () => {
     const generalHistoryKey = "-1003774691294:topic:1";
-    const spoofedHistoryKey = "-1003774691294:topic:3731";
-    const groupHistories = new Map([
-      [generalHistoryKey, [{ sender: "Alice", body: "general topic context", timestamp: 1 }]],
-      [spoofedHistoryKey, [{ sender: "Bob", body: "spoofed topic context", timestamp: 2 }]],
-    ]);
     deliverInboundReplyWithMessageSendContext.mockResolvedValue({
       status: "handled_visible",
       delivery: {
@@ -549,8 +407,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
         resolvedThreadId: undefined,
         threadSpec: { id: 1, scope: "forum" },
         historyKey: generalHistoryKey,
-        historyLimit: 10,
-        groupHistories,
       }),
       replyToMode: "off",
       streamMode: "off",
@@ -567,11 +423,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
 
   it("does not recover forum thread context from a different group session key", async () => {
     const currentHistoryKey = "-100555:topic:1";
-    const otherGroupHistoryKey = "-1003774691294:topic:3731";
-    const groupHistories = new Map([
-      [currentHistoryKey, [{ sender: "Alice", body: "current general context", timestamp: 1 }]],
-      [otherGroupHistoryKey, [{ sender: "Bob", body: "other group topic context", timestamp: 2 }]],
-    ]);
     deliverInboundReplyWithMessageSendContext.mockResolvedValue({
       status: "handled_visible",
       delivery: {
@@ -610,8 +461,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
         resolvedThreadId: undefined,
         threadSpec: { id: 1, scope: "forum" },
         historyKey: currentHistoryKey,
-        historyLimit: 10,
-        groupHistories,
       }),
       replyToMode: "off",
       streamMode: "off",
@@ -631,9 +480,6 @@ describeTelegramDispatch("dispatchTelegramMessage context-recovery", () => {
     });
     const outboundCtxPayload = expectRecordFields(outbound.ctxPayload, {});
     expect(outboundCtxPayload.Body).not.toContain("other group topic context");
-    expect(groupHistories.get(otherGroupHistoryKey)).toEqual([
-      expect.objectContaining({ body: "other group topic context" }),
-    ]);
     expect(deliverReplies).not.toHaveBeenCalled();
   });
 });

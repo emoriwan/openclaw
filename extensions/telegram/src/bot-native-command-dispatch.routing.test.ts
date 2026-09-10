@@ -1,4 +1,6 @@
+import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
+import { withTempHome } from "openclaw/plugin-sdk/test-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createConfiguredAcpTopicBinding,
@@ -23,11 +25,58 @@ import {
   createTelegramPrivateCommandContext,
   createTelegramTopicCommandContext,
 } from "./bot-native-commands.fixture-test-support.js";
+import { recordTelegramConversationMessages } from "./conversation-observation.js";
 
 const { persistentBindingMocks, replyMocks, sessionBindingMocks, sessionMocks } = executorTestMocks;
 
 describe("Telegram native command dispatch routing", () => {
   beforeEach(resetSessionMetaMocks);
+
+  it.each(["new", "reset"])(
+    "captures the topic boundary for authorized native /%s",
+    async (commandName) => {
+      await withTempHome(async (home) => {
+        const storePath = path.join(
+          home,
+          ".openclaw",
+          "agents",
+          "main",
+          "sessions",
+          "sessions.json",
+        );
+        sessionMocks.resolveStorePath.mockReturnValue(storePath);
+        const { handler } = registerAndResolveCommandHandler({
+          commandName,
+          cfg: { session: { store: storePath } },
+          allowFrom: ["200"],
+          groupAllowFrom: ["200"],
+        });
+        const ctx = createTelegramTopicCommandContext();
+        ctx.message.text = `/${commandName}@openclaw_bot`;
+        const observe = (messageId: number) =>
+          recordTelegramConversationMessages({
+            agentId: "main",
+            storePath,
+            accountId: "default",
+            chatId: ctx.message.chat.id,
+            threadSpec: { scope: "forum", id: ctx.message.message_thread_id },
+            messages: [{ ...ctx.message, message_id: messageId, text: `message-${messageId}` }],
+          });
+        const before = await observe(1);
+        await handler(ctx);
+        const capture =
+          dispatchChannelInboundTurnMock.mock.calls[0]?.[0].ctxPayload.ConversationHistory;
+        expect(capture).toMatchObject({
+          owner: before.owner,
+          conversationRef: before.conversationRef,
+          requestSourceIds: [String(ctx.message.message_id)],
+        });
+        expect(capture!.throughSequence).toBeGreaterThan(before.throughSequence);
+        const later = await observe(3);
+        expect(later.throughSequence).toBeGreaterThan(capture!.throughSequence);
+      });
+    },
+  );
 
   it("keeps the owning Gateway dispatcher on a native slash turn", async () => {
     const dispatchReplyFromConfig = vi.fn();

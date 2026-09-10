@@ -1,3 +1,4 @@
+import type { Message } from "grammy/types";
 // Telegram tests cover bot.create telegram bot.media group skip warning plugin behavior.
 import { coerceErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -119,6 +120,7 @@ function createChannelPostContext(params: {
   messageId: number;
   date: number;
   caption?: string;
+  captionEntities?: Message["caption_entities"];
   mediaGroupId: string;
   photoFileId: string;
 }) {
@@ -128,6 +130,7 @@ function createChannelPostContext(params: {
       message_id: params.messageId,
       date: params.date,
       ...(params.caption ? { caption: params.caption } : {}),
+      ...(params.captionEntities ? { caption_entities: params.captionEntities } : {}),
       media_group_id: params.mediaGroupId,
       photo: [{ file_id: params.photoFileId }],
     },
@@ -141,6 +144,7 @@ async function queueChannelPostAlbum(
   params: {
     baseMessageId: number;
     caption: string;
+    captionEntities?: Message["caption_entities"];
     mediaGroupId: string;
     photoFileIds: string[];
   },
@@ -150,7 +154,9 @@ async function queueChannelPostAlbum(
       createChannelPostContext({
         messageId: params.baseMessageId + index,
         date: 1736380800 + index,
-        ...(index === 0 ? { caption: params.caption } : {}),
+        ...(index === 0
+          ? { caption: params.caption, captionEntities: params.captionEntities }
+          : {}),
         mediaGroupId: params.mediaGroupId,
         photoFileId: fileId,
       }),
@@ -202,7 +208,8 @@ describe("createTelegramBot media-group skip warning (#55216)", () => {
       const handler = getChannelPostHandler();
       const baseMessageId = await queueChannelPostAlbum(handler, {
         baseMessageId: 600,
-        caption: "album caption",
+        caption: "@openclaw_bot album caption",
+        captionEntities: [{ type: "mention", offset: 0, length: 13 }],
         mediaGroupId: "skip-warn-album-1",
         photoFileIds: ["p1", "p2"],
       });
@@ -243,7 +250,8 @@ describe("createTelegramBot media-group skip warning (#55216)", () => {
       const handler = getChannelPostHandler();
       await queueChannelPostAlbum(handler, {
         baseMessageId: 700,
-        caption: "all-fail album",
+        caption: "@openclaw_bot all-fail album",
+        captionEntities: [{ type: "mention", offset: 0, length: 13 }],
         mediaGroupId: "skip-warn-album-2",
         photoFileIds: ["p1", "p2"],
       });
@@ -278,7 +286,8 @@ describe("createTelegramBot media-group skip warning (#55216)", () => {
       const handler = getChannelPostHandler();
       await queueChannelPostAlbum(handler, {
         baseMessageId: 800,
-        caption: "plural album",
+        caption: "@openclaw_bot plural album",
+        captionEntities: [{ type: "mention", offset: 0, length: 13 }],
         mediaGroupId: "skip-warn-album-3",
         photoFileIds: ["p1", "p2", "p3"],
       });

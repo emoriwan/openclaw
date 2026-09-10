@@ -248,14 +248,14 @@ describe("crabline transport", () => {
           result: [
             {
               message: {
-                entities: [{ length: 5, offset: 0, type: "bot_command" }],
-                text: "/stop",
+                entities: [{ length: 18, offset: 0, type: "bot_command" }],
+                text: "/stop@crabline_bot",
               },
             },
             {
               message: {
-                entities: [{ length: 7, offset: 0, type: "bot_command" }],
-                text: "/status",
+                entities: [{ length: 20, offset: 0, type: "bot_command" }],
+                text: "/status@crabline_bot",
               },
             },
           ],

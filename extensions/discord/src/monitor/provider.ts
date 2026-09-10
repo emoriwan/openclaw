@@ -139,10 +139,6 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
   const textLimit = resolveTextChunkLimit(cfg, "discord", account.accountId, {
     fallbackLimit: 2000,
   });
-  const historyLimit = Math.max(
-    0,
-    opts.historyLimit ?? discordCfg.historyLimit ?? cfg.messages?.groupChat?.historyLimit ?? 20,
-  );
   const replyToMode = opts.replyToMode ?? discordCfg.replyToMode ?? "off";
   const dmEnabled = dmConfig?.enabled ?? true;
   const dmPolicy =
@@ -214,7 +210,6 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       groupDmChannels,
       groupPolicy,
       guildEntries,
-      historyLimit,
       mediaMaxBytes,
       nativeEnabled,
       nativeSkillsEnabled,
@@ -411,10 +406,6 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
     });
 
     const logger = createSubsystemLogger("discord/monitor");
-    const guildHistories = new Map<
-      string,
-      import("./message-handler.history.js").DiscordHistoryEntry[]
-    >();
     const { botUserId, botUserName } = await fetchDiscordBotIdentity({
       client,
       token,
@@ -469,8 +460,6 @@ export async function monitorDiscordProvider(opts: MonitorDiscordOpts = {}) {
       setStatus: opts.setStatus,
       abortSignal: opts.abortSignal,
       botUserId,
-      guildHistories,
-      historyLimit,
       mediaMaxBytes,
       textLimit,
       replyToMode,

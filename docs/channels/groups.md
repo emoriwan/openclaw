@@ -15,6 +15,8 @@ For always-on rooms that should provide quiet context unless the agent explicitl
 
 OpenClaw "lives" on your own messaging accounts. There is no separate WhatsApp bot user: if **you** are in a group, OpenClaw can see that group and respond there.
 
+Discord and Telegram retain permitted unread group text and start conversational input only for a native bot mention or reply. They keep legacy ambient settings valid for upgrades, with warnings; those settings no longer enable ambient turns on these two channels. See [Discord access control](/channels/discord/access-control) and [Telegram access control](/channels/telegram/access-control). The window and activation settings below continue to apply to channels that have not adopted durable text history.
+
 Default behavior:
 
 - Groups are restricted (`groupPolicy: "allowlist"`); group senders are blocked until allowlisted.

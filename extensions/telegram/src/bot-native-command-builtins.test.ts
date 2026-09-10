@@ -1,5 +1,10 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
-import { beforeEach, describe, expect, it } from "vitest";
+import {
+  createTestRegistry,
+  setActivePluginRegistry,
+} from "openclaw/plugin-sdk/plugin-test-runtime";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { telegramPlugin } from "../api.js";
 import {
   executorTestMocks,
   expectRecordFields,
@@ -13,6 +18,34 @@ const { agentRuntimeMocks, commandAuthMocks, replyMocks, sessionMocks } = execut
 
 describe("Telegram native command built-ins", () => {
   beforeEach(resetSessionMetaMocks);
+  afterEach(() => setActivePluginRegistry(createTestRegistry([])));
+
+  it("offers only mention in the native activation argument menu", async () => {
+    setActivePluginRegistry(
+      createTestRegistry([{ pluginId: "telegram", source: "test", plugin: telegramPlugin }]),
+    );
+    const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/command-auth-native")>(
+      "openclaw/plugin-sdk/command-auth-native",
+    );
+    commandAuthMocks.resolveCommandArgMenu.mockImplementation(actual.resolveCommandArgMenu);
+    const { handler, sendMessage } = registerAndResolveCommandHandler({
+      commandName: "activation",
+      cfg: {},
+      allowFrom: ["*"],
+    });
+    await handler(createTelegramPrivateCommandContext());
+    expectSendMessageCall({
+      sendMessage,
+      chatId: 100,
+      optionFields: {
+        reply_markup: {
+          inline_keyboard: [[{ text: "mention", callback_data: "tgcmd:/activation mention" }]],
+        },
+      },
+      label: "activation menu",
+    });
+    expect(replyMocks.dispatchReplyWithBufferedBlockDispatcher).not.toHaveBeenCalled();
+  });
 
   it("uses the target session model when building native argument menus", async () => {
     const cfg = {

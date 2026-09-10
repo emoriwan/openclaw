@@ -325,7 +325,9 @@ export async function detectAndLoadPromptImages(params: {
   // initial message. Resolve without persisting before choosing image ownership.
   const message = await params.userTurnTranscriptRecorder?.resolveMessage();
   const media = normalizeMediaFacts(
-    (message ? readPersistedMediaFacts(message) : undefined) ?? params.media,
+    (message
+      ? (readRuntimePromptMediaFacts(message) ?? readPersistedMediaFacts(message))
+      : undefined) ?? params.media,
   );
   const mediaImageLayout =
     (message ? readPersistedMediaImageLayout(message) : undefined) ?? params.mediaImageLayout;
@@ -407,11 +409,12 @@ export async function detectAndLoadPromptImages(params: {
       ? (refsByFact.get(slot.factIndex) ?? [])
       : [],
   );
+  const ownedRefs = [...attachmentRefs, ...availableRefs.filter((ref) => !ref.hydrate)];
   const attachmentKeys = new Set(
-    attachmentRefs.map((ref) => refDedupeKey(ref, ref.workspaceDir ?? params.workspaceDir)),
+    ownedRefs.map((ref) => refDedupeKey(ref, ref.workspaceDir ?? params.workspaceDir)),
   );
   const attachmentRawKeys = new Set(
-    attachmentRefs.flatMap((ref) => ref.aliases.flatMap((alias) => rawAliasDedupeKey(alias) ?? [])),
+    ownedRefs.flatMap((ref) => ref.aliases.flatMap((alias) => rawAliasDedupeKey(alias) ?? [])),
   );
   const promptRefs = detectImageReferences(params.prompt).filter(
     (ref) =>
@@ -572,7 +575,7 @@ async function projectOrderedPromptMedia(params: {
   for (const [factIndex, fact] of params.media.entries()) {
     if (isImageMediaFact(fact)) {
       projected.push(...(imagesByFact.get(factIndex) ?? []));
-    } else if (isVideoMediaFact(fact)) {
+    } else if (isVideoMediaFact(fact) && !fact.contextOnly) {
       projected.push(
         params.options.provider
           ? await materializeVideoFact(fact, params.budget, params.options)

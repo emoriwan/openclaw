@@ -47,6 +47,7 @@ type SessionSqliteDatabase = Pick<
   | "board_tabs"
   | "board_widgets"
   | "conversation_deliveries"
+  | "conversation_history"
   | "conversations"
   | "heartbeat_outcomes"
   | "session_conversations"

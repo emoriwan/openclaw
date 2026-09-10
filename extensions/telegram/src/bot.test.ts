@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import {
   clearPluginInteractiveHandlers,
@@ -10,7 +11,10 @@ import {
   createPluginStateSyncKeyedStoreForTests,
   resetPluginStateStoreForTests,
 } from "openclaw/plugin-sdk/plugin-state-test-runtime";
-import { createNonExitingRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
+import {
+  createNonExitingRuntimeEnv,
+  loadUserTurnTranscriptRecorderFactoryForTest,
+} from "openclaw/plugin-sdk/plugin-test-runtime";
 import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
 import {
   listSessionEntries,
@@ -429,6 +433,33 @@ function createTelegramTestStorePath(label: string): string {
   return telegramTestState.path(`${label}-${telegramTestStoreSequence}.json`);
 }
 
+async function readObservedPendingInput(payload: MsgContext, storePath: string): Promise<string> {
+  const capture = payload.ConversationHistory;
+  const sessionKey = payload.SessionKey;
+  if (!capture || !sessionKey || !payload.MessageSid) {
+    throw new Error("Expected a routed request with observed conversation history");
+  }
+  const sessionId = `history-${payload.MessageSid}`;
+  const target = { agentId: capture.owner.agentId, sessionKey, sessionId, storePath };
+  await upsertSessionEntry({ ...target, entry: { sessionId, updatedAt: Date.now() } });
+  const createRecorder = await loadUserTurnTranscriptRecorderFactoryForTest();
+  const recorder = createRecorder({
+    input: { text: payload.CommandBody, idempotencyKey: sessionId },
+    target: { ...target, sessionEntry: undefined },
+    conversationHistory: capture,
+  });
+  try {
+    expect(await recorder.stageApproved!({ runId: sessionId, assertCurrent: () => {} })).toBe(true);
+    const message = recorder.getPendingInputMessage?.();
+    if (!message) {
+      throw new Error("Expected the captured input to be staged");
+    }
+    return JSON.stringify(message.content);
+  } finally {
+    recorder.finishPendingInput?.("cancelled");
+  }
+}
+
 async function installTelegramPollRegistryForTests(entry?: TelegramPollRegistryEntry) {
   setTelegramPluginStateRuntimeForTests();
   const store = createPluginStateKeyedStoreForTests<TelegramPollRegistryEntry>("telegram", {
@@ -716,8 +747,6 @@ function createDirectDispatchContext(cfg: OpenClawConfig): TelegramDispatchParam
     isGroup: false,
     threadSpec: { scope: "none" },
     isForum: false,
-    historyLimit: 0,
-    groupHistories: new Map(),
     skillFilter: undefined,
     route: {
       accountId: "default",
@@ -1344,7 +1373,7 @@ describe("createTelegramBot", () => {
     }
   });
 
-  it("dedupes outbound prompt-context sends with ambient group history", async () => {
+  it("keeps cached outbound messages as native reply context", async () => {
     const cfg = {
       messages: { groupChat: { unmentionedInbound: "room_event", mentionPatterns: [] } },
       channels: {
@@ -1389,7 +1418,7 @@ describe("createTelegramBot", () => {
 
     const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
     await handler({
-      me: { id: 999, username: "openclaw_bot" },
+      me: { ...telegramBotInfoForTest, id: 999 },
       getFile: getEmptyTelegramFile,
       message: {
         chat: { id: -42, type: "group", title: "Ops" },
@@ -1397,29 +1426,20 @@ describe("createTelegramBot", () => {
         date: 1_736_380_800,
         message_id: 701,
         from: { id: 201, is_bot: false, first_name: "Sam" },
+        reply_to_message: {
+          chat: { id: -42, type: "group", title: "Ops" },
+          date: 1_736_380_700,
+          message_id: 700,
+          from: { id: 999, is_bot: true, first_name: "OpenClaw" },
+          text: "Bot just replied",
+        },
       },
     });
 
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
-    expect(payload.InboundEventKind).toBe("room_event");
-    expect(payload.InboundHistory).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ body: "Bot just replied", sender: "OpenClaw (you)" }),
-      ]),
-    );
-    const [conversationContext] = requireArray(
-      payload.ChannelStructuredContext,
-      "structured context",
-    );
-    const contextPayload = requireRecord(
-      requireRecord(conversationContext, "conversation context").payload,
-      "conversation context payload",
-    );
-    const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-      (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-    );
-    expect(messages.filter((message) => message.message_id === "700")).toEqual([
+    expect(payload.InboundEventKind).toBe("user_request");
+    expect(payload.ReplyChain?.filter((message) => message.messageId === "700")).toEqual([
       expect.objectContaining({
         body: "Bot just replied",
         sender: "OpenClaw (you)",
@@ -3142,7 +3162,8 @@ describe("createTelegramBot", () => {
     await handler({
       message: {
         chat: { id: 42, type: "group", title: "Ops" },
-        text: "hello",
+        text: "@openclaw_bot hello",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
         message_id: 2,
         from: {
@@ -3172,7 +3193,7 @@ describe("createTelegramBot", () => {
     expect(payload.SenderUsername).toBe("ada");
   });
 
-  it("adds live chat and reply-target windows for stale group replies", async () => {
+  it("keeps native stale replies beside the captured group conversation", async () => {
     mockTelegramConfig(
       { groupPolicy: "open", groups: { "*": { requireMention: false } } },
       { agents: { defaults: { envelopeTimezone: "utc" } } },
@@ -3222,6 +3243,7 @@ describe("createTelegramBot", () => {
       message: {
         chat: { id: 42, type: "group", title: "Ops" },
         text: "@openclaw_bot thoughts?",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380920,
         message_id: 202,
         from: { id: 203, is_bot: false, first_name: "Avery" },
@@ -3237,35 +3259,25 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
-    const [conversationContext] = requireArray(
-      payload.ChannelStructuredContext,
-      "structured context",
+    expect(payload.ReplyChain).toContainEqual(
+      expect.objectContaining({
+        messageId: "100",
+        sender: "Assistant",
+        body: "Earlier deployment answer",
+      }),
     );
-    const contextRecord = requireRecord(conversationContext, "conversation context");
-    expect(contextRecord.label).toBe("Conversation context");
-    const contextPayload = requireRecord(contextRecord.payload, "conversation context payload");
-    expect(contextPayload.relation).toBe("selected_for_current_message");
-    const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-      (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-    );
-    const messagesById = new Map(messages.map((message) => [message.message_id, message]));
-    expect(messagesById.get("100")?.sender).toBe("Assistant");
-    expect(messagesById.get("100")?.body).toBe("Earlier deployment answer");
-    expect(messagesById.get("100")?.is_reply_target).toBe(true);
-    expect(messagesById.get("200")?.sender).toBe("Sam");
-    expect(messagesById.get("200")?.body).toBe("Lunch after standup?");
-    expect(messagesById.get("201")?.sender).toBe("Riley");
-    expect(messagesById.get("201")?.body).toBe("After the incident review.");
+    expect(payload.ConversationHistory?.requestSourceIds).toEqual(["202"]);
   });
 
-  it("keeps skipped group messages in default recent group history context", async () => {
+  it("includes unaddressed group messages in the durable pending input", async () => {
+    const storePath = createTelegramTestStorePath("observed-group-history");
     mockTelegramConfig(
       {
         groupPolicy: "allowlist",
         groupAllowFrom: ["111", "222"],
         groups: { "*": { requireMention: true } },
       },
-      { agents: { defaults: { envelopeTimezone: "utc" } } },
+      { session: { store: storePath }, agents: { defaults: { envelopeTimezone: "utc" } } },
     );
 
     createTelegramBot({ token: "tok" });
@@ -3301,126 +3313,14 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
-    expect(payload.ChannelStructuredContext).toEqual([
-      {
-        label: "Conversation context",
-        payload: {
-          messages: [
-            expect.objectContaining({
-              body: "Please run the maintenance step later.",
-              sender: "Requester",
-            }),
-          ],
-          order: "chronological",
-          relation: "selected_for_current_message",
-        },
-        source: "telegram",
-        type: "chat_window",
-      },
-    ]);
-    // Media-less unmentioned messages must reach the canonical mention gate so
-    // the rolling group history window records them (not just the reply cache).
-    expect(payload.InboundHistory).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          body: "Please run the maintenance step later.",
-          sender: "Requester id:111",
-        }),
-      ]),
-    );
+    const input = await readObservedPendingInput(payload, storePath);
+    expect(input).toContain("Please run the maintenance step later.");
+    expect(input).toContain("Requester");
+    expect(input).toContain("@openclaw_bot Hello");
   });
 
-  it("excludes ambient transcript rows from live group conversation context", async () => {
-    mockTelegramConfig(
-      {
-        groupPolicy: "allowlist",
-        groupAllowFrom: ["111", "222", "333", "444"],
-        groups: { "*": { requireMention: true } },
-      },
-      { agents: { defaults: { envelopeTimezone: "utc" } } },
-    );
-
-    const previousReadAmbient = telegramBotDepsForTest.readAmbientTranscriptWatermark;
-    const previousResolveAmbientKey = telegramBotDepsForTest.resolveAmbientTranscriptWatermarkKey;
-    telegramBotDepsForTest.resolveAmbientTranscriptWatermarkKey = vi.fn(
-      () => "telegram:default:42",
-    );
-    telegramBotDepsForTest.readAmbientTranscriptWatermark = vi.fn(() => ({
-      sessionId: "session-current",
-      messageId: "502",
-      timestampMs: 1_736_380_860_000,
-      updatedAt: 1_736_380_900_000,
-    }));
-
-    try {
-      createTelegramBot({ token: "tok" });
-      const handler = getOnHandler("message") as (ctx: Record<string, unknown>) => Promise<void>;
-      const baseCtx = {
-        me: { id: 999, username: "openclaw_bot" },
-        getFile: getEmptyTelegramFile,
-      };
-
-      for (const message of [
-        {
-          chat: { id: 42, type: "group", title: "Ops" },
-          text: "persisted ambient one",
-          date: 1_736_380_800,
-          message_id: 501,
-          from: { id: 111, is_bot: false, first_name: "Requester" },
-        },
-        {
-          chat: { id: 42, type: "group", title: "Ops" },
-          text: "persisted ambient two",
-          date: 1_736_380_860,
-          message_id: 502,
-          from: { id: 222, is_bot: false, first_name: "Operator" },
-        },
-        {
-          chat: { id: 42, type: "group", title: "Ops" },
-          text: "unpersisted gap",
-          date: 1_736_380_920,
-          message_id: 503,
-          from: { id: 333, is_bot: false, first_name: "Mira" },
-        },
-      ]) {
-        await handler({ ...baseCtx, message });
-      }
-
-      expect(replySpy).not.toHaveBeenCalled();
-
-      await handler({
-        ...baseCtx,
-        message: {
-          chat: { id: 42, type: "group", title: "Ops" },
-          text: "@openclaw_bot what changed?",
-          date: 1_736_380_980,
-          message_id: 504,
-          from: { id: 444, is_bot: false, first_name: "Pat" },
-          entities: [{ type: "mention", offset: 0, length: 13 }],
-        },
-      });
-
-      expect(replySpy).toHaveBeenCalledTimes(1);
-      const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
-      const [conversationContext] = requireArray(
-        payload.ChannelStructuredContext,
-        "structured context",
-      );
-      const contextPayload = requireRecord(
-        requireRecord(conversationContext, "conversation context").payload,
-        "conversation context payload",
-      );
-      const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-        (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-      );
-      expect(messages.map((message) => message.body)).toEqual(["unpersisted gap"]);
-    } finally {
-      telegramBotDepsForTest.readAmbientTranscriptWatermark = previousReadAmbient;
-      telegramBotDepsForTest.resolveAmbientTranscriptWatermarkKey = previousResolveAmbientKey;
-    }
-  });
-
-  it("honors historyLimit zero for group chat-window context", async () => {
+  it("retains unread group text when legacy historyLimit is zero", async () => {
+    const storePath = createTelegramTestStorePath("observed-group-zero-limit");
     mockTelegramConfig(
       {
         groupPolicy: "allowlist",
@@ -3428,7 +3328,7 @@ describe("createTelegramBot", () => {
         historyLimit: 0,
         groups: { "*": { requireMention: true } },
       },
-      { agents: { defaults: { envelopeTimezone: "utc" } } },
+      { session: { store: storePath }, agents: { defaults: { envelopeTimezone: "utc" } } },
     );
 
     createTelegramBot({ token: "tok" });
@@ -3442,7 +3342,7 @@ describe("createTelegramBot", () => {
       ...baseCtx,
       message: {
         chat: { id: 42, type: "group", title: "Ops" },
-        text: "Do not include this cached group line.",
+        text: "Keep this observed group line.",
         date: 1736380800,
         message_id: 601,
         from: { id: 111, is_bot: false, first_name: "Requester" },
@@ -3464,14 +3364,16 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
-    expect(payload.ChannelStructuredContext).toBeUndefined();
-    expect(payload.Body).not.toContain("Do not include this cached group line.");
+    const input = await readObservedPendingInput(payload, storePath);
+    expect(input).toContain("Keep this observed group line.");
+    expect(input).toContain("@openclaw_bot Hello");
   });
 
-  it("updates cached bot messages from Telegram edit updates", async () => {
+  it("includes Telegram edit updates in captured group history", async () => {
+    const storePath = createTelegramTestStorePath("observed-group-edits");
     mockTelegramConfig(
       { groupPolicy: "open", groups: { "*": { requireMention: false } } },
-      { agents: { defaults: { envelopeTimezone: "utc" } } },
+      { session: { store: storePath }, agents: { defaults: { envelopeTimezone: "utc" } } },
     );
 
     createTelegramBot({ token: "tok" });
@@ -3513,6 +3415,7 @@ describe("createTelegramBot", () => {
     replySpy.mockClear();
     await editedHandler({
       ...baseCtx,
+      update: { update_id: 35017 },
       editedMessage: {
         chat,
         text: fullAnswer,
@@ -3529,7 +3432,8 @@ describe("createTelegramBot", () => {
       ...baseCtx,
       message: {
         chat,
-        text: "wtf",
+        text: "@openclaw_bot explain the updated answer",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1778474850,
         message_id: 35018,
         from: { id: 202, is_bot: false, first_name: "Kesava" },
@@ -3538,19 +3442,10 @@ describe("createTelegramBot", () => {
 
     expect(replySpy).toHaveBeenCalledTimes(1);
     const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
-    const [conversationContext] = requireArray(
-      payload.ChannelStructuredContext,
-      "structured context",
-    );
-    const contextRecord = requireRecord(conversationContext, "conversation context");
-    const contextPayload = requireRecord(contextRecord.payload, "conversation context payload");
-    const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-      (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-    );
-    const messagesById = new Map(messages.map((message) => [message.message_id, message]));
-    expect(messagesById.get("35016")?.sender).toBe("Super Serious Bot");
-    expect(messagesById.get("35016")?.body).toBe(fullAnswer);
-    expect(messagesById.get("35016")?.body).not.toBe("K");
+    const input = await readObservedPendingInput(payload, storePath);
+    expect(input).toContain("Super Serious Bot");
+    expect(input).toContain("[Edited Telegram message 35016]");
+    expect(input).toContain(fullAnswer);
   });
 
   it("keeps direct Telegram media context when transcript context exists", async () => {
@@ -4641,6 +4536,7 @@ describe("createTelegramBot", () => {
           chat,
           message_id: 103,
           text: "@openclaw_bot explain what went wrong",
+          entities: [{ type: "mention", offset: 0, length: 13 }],
           date: 1736380800,
           from: { id: 1, is_bot: false, first_name: "UserA" },
           reply_to_message: {
@@ -4657,16 +4553,7 @@ describe("createTelegramBot", () => {
     }
 
     expect(replySpy).toHaveBeenCalledTimes(1);
-    const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call") as {
-      ReplyChain?: Array<{
-        messageId?: string;
-        sender?: string;
-        body?: string;
-        mediaRef?: string;
-        mediaPath?: string;
-      }>;
-      ChannelStructuredContext?: unknown[];
-    };
+    const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
     expect(payload.ReplyChain?.map((entry) => entry.messageId)).toEqual(["102", "101"]);
     expect(payload.ReplyChain?.[1]).toMatchObject({
       sender: "OpenClaw (you)",
@@ -4680,34 +4567,12 @@ describe("createTelegramBot", () => {
       expect(payload.ReplyChain?.[1]?.mediaPath).toBeUndefined();
       expect(payload.ReplyChain?.[1]?.mediaRef).toBe("telegram:file/generated-photo-1");
     }
-    const [conversationContext] = requireArray(
-      payload.ChannelStructuredContext,
-      "structured context",
-    );
-    const contextRecord = requireRecord(conversationContext, "conversation context");
-    const contextPayload = requireRecord(contextRecord.payload, "conversation context payload");
-    const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-      (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-    );
-    const messagesById = new Map(messages.map((message) => [message.message_id, message]));
-    expect(messagesById.get("101")).toMatchObject({
-      sender: "OpenClaw (you)",
-      body: "Done, here is the image",
-      is_reply_target: true,
-    });
-    if (expectHydrated) {
-      expect(messagesById.get("101")?.media_path).toMatch(/^media:\/\/inbound\//);
-      expect(messagesById.get("101")?.media_ref).toBeUndefined();
-    } else {
-      expect(messagesById.get("101")?.media_path).toBeUndefined();
-      expect(messagesById.get("101")?.media_ref).toBe("telegram:file/generated-photo-1");
-    }
-    expect(messagesById.get("102")).toMatchObject({
+    expect(payload.ReplyChain?.[0]).toMatchObject({
       sender: "UserB",
       body: "Why is there a 4th person?",
-      reply_to_id: "101",
-      is_reply_target: true,
+      replyToId: "101",
     });
+    expect(payload.ConversationHistory?.requestSourceIds).toEqual(["103"]);
     expect(getFileSpy).not.toHaveBeenCalled();
     expect(mediaFetch).not.toHaveBeenCalled();
   });
@@ -4764,7 +4629,8 @@ describe("createTelegramBot", () => {
         message: {
           chat,
           message_id: 103,
-          text: "explain this",
+          text: "@openclaw_bot explain this",
+          entities: [{ type: "mention", offset: 0, length: 13 }],
           date: 1736380800,
           from: { id: 1, is_bot: false, first_name: "Allowed" },
           reply_to_message: {
@@ -4785,23 +4651,12 @@ describe("createTelegramBot", () => {
     }
 
     expect(replySpy).toHaveBeenCalledTimes(1);
-    const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call") as {
-      ReplyChain?: unknown[];
-      ChannelStructuredContext?: unknown[];
-    };
+    const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
     expect(payload.ReplyChain).toBeUndefined();
-    const [conversationContext] = requireArray(
-      payload.ChannelStructuredContext,
-      "structured context",
-    );
-    const contextRecord = requireRecord(conversationContext, "conversation context");
-    const contextPayload = requireRecord(contextRecord.payload, "conversation context payload");
-    const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-      (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-    );
-    const hiddenMessage = messages.find((message) => message.message_id === "102");
-    expect(hiddenMessage?.media_ref).toBe("telegram:file/hidden-photo-1");
-    expect(hiddenMessage?.media_path).toBeUndefined();
+    expect(payload.ReplyToBody).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain("hidden-photo-1");
+    expect(JSON.stringify(payload)).not.toContain("hidden image");
+    expect(payload.ConversationHistory?.requestSourceIds).toEqual(["103"]);
     expect(getFileSpy).not.toHaveBeenCalled();
     expect(mediaFetch).not.toHaveBeenCalled();
   });
@@ -4849,7 +4704,8 @@ describe("createTelegramBot", () => {
         message: {
           chat,
           message_id: 103,
-          text: "explain this",
+          text: "@openclaw_bot explain this",
+          entities: [{ type: "mention", offset: 0, length: 13 }],
           date: 1736380800,
           from: { id: 1, is_bot: false, first_name: "Allowed" },
           direct_messages_topic: { topic_id: 77 },
@@ -4872,21 +4728,12 @@ describe("createTelegramBot", () => {
     }
 
     expect(replySpy).toHaveBeenCalledTimes(1);
-    const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call") as {
-      ChannelStructuredContext?: unknown[];
-    };
-    const [conversationContext] = requireArray(
-      payload.ChannelStructuredContext,
-      "structured context",
-    );
-    const contextRecord = requireRecord(conversationContext, "conversation context");
-    const contextPayload = requireRecord(contextRecord.payload, "conversation context payload");
-    const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-      (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-    );
-    const hiddenMessage = messages.find((message) => message.message_id === "102");
-    expect(hiddenMessage?.media_ref).toBe("telegram:file/hidden-channel-photo-1");
-    expect(hiddenMessage?.media_path).toBeUndefined();
+    const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
+    expect(payload.MessageThreadId).toBe(77);
+    expect(payload.ReplyChain).toBeUndefined();
+    expect(payload.ReplyToBody).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain("hidden-channel-photo-1");
+    expect(JSON.stringify(payload)).not.toContain("hidden image");
     expect(getFileSpy).not.toHaveBeenCalled();
     expect(mediaFetch).not.toHaveBeenCalled();
   });
@@ -4985,6 +4832,7 @@ describe("createTelegramBot", () => {
             chat,
             message_id: 103,
             text: "@openclaw_bot explain this",
+            entities: [{ type: "mention", offset: 0, length: 13 }],
             date: 1736380800,
             from: { id: 1, is_bot: false, first_name: "Allowed" },
             reply_to_message: {
@@ -5003,27 +4851,24 @@ describe("createTelegramBot", () => {
 
       expect(runtimeError).not.toHaveBeenCalled();
       expect(replySpy).toHaveBeenCalledTimes(1);
-      const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call") as {
-        ChannelStructuredContext?: unknown[];
-      };
-      const [conversationContext] = requireArray(
-        payload.ChannelStructuredContext,
-        "structured context",
-      );
-      const contextRecord = requireRecord(conversationContext, "conversation context");
-      const contextPayload = requireRecord(contextRecord.payload, "conversation context payload");
-      const messages = requireArray(contextPayload.messages, "conversation context messages").map(
-        (message, index) => requireRecord(message, `conversation context message ${index + 1}`),
-      );
-      const replyMessage = messages.find((message) => message.message_id === "102");
+      const payload = mockMsgContextArg(replySpy, 0, 0, "replySpy call");
+      const replyMessage = payload.ReplyChain?.find((message) => message.messageId === "102");
       if (expectHydrated) {
-        expect(replyMessage?.media_path).toMatch(/^media:\/\/inbound\//);
-        expect(replyMessage?.media_ref).toBeUndefined();
+        expect(replyMessage).toMatchObject({ senderId: "2", body: "allowed image" });
+        const mediaPath = replyMessage?.mediaPath;
+        if (!mediaPath) {
+          throw new Error("Expected the downloaded reply attachment path");
+        }
+        expect(mediaPath).toMatch(/[/\\]media[/\\]inbound[/\\][^/\\]+$/);
+        expect(await readFile(mediaPath)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+        expect(replyMessage?.mediaRef).toBeUndefined();
         expect(getFileSpy).toHaveBeenCalledWith("allowed-photo-1", expect.any(AbortSignal));
         expect(mediaFetch).toHaveBeenCalledTimes(1);
       } else {
-        expect(replyMessage?.media_path).toBeUndefined();
-        expect(replyMessage?.media_ref).toBe("telegram:file/allowed-photo-1");
+        expect(replyMessage).toBeUndefined();
+        expect(payload.ReplyToBody).toBeUndefined();
+        expect(JSON.stringify(payload)).not.toContain("allowed-photo-1");
+        expect(JSON.stringify(payload)).not.toContain("allowed image");
         expect(getFileSpy).not.toHaveBeenCalled();
         expect(mediaFetch).not.toHaveBeenCalled();
       }
@@ -5363,7 +5208,8 @@ describe("createTelegramBot", () => {
       message: {
         message_id: 9004,
         chat: { id: -1007, type: "group", title: "Ops" },
-        text: "Thoughts?",
+        text: "@openclaw_bot Thoughts?",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
         from: { id: 1, first_name: "Ada", username: "ada", is_bot: false },
         reply_to_message: {
@@ -5449,7 +5295,8 @@ describe("createTelegramBot", () => {
           is_forum: true,
         },
         from: { id: 123456789, username: "testuser" },
-        text: "hello",
+        text: "@openclaw_bot hello",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
         message_thread_id: 99,
       },
@@ -5474,7 +5321,8 @@ describe("createTelegramBot", () => {
       message: {
         chat: { id: -100123456789, type: "group", title: "Test Group" },
         from: { id: 999999, username: "random" },
-        text: "hello",
+        text: "@openclaw_bot hello",
+        entities: [{ type: "mention", offset: 0, length: 13 }],
         date: 1736380800,
       },
       me: { username: "openclaw_bot" },
@@ -5498,7 +5346,8 @@ describe("createTelegramBot", () => {
       message: {
         chat: { id: -100123456789, type: "group", title: "Test Group" },
         from: { id: 999999, username: "random" },
-        text: "/status",
+        text: "/status@openclaw_bot",
+        entities: [{ type: "bot_command", offset: 0, length: 20 }],
         date: 1736380800,
       },
       me: { username: "openclaw_bot" },

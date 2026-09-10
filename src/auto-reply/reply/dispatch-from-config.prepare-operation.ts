@@ -11,7 +11,6 @@ import {
   markPluginBindingFallbackNoticeShown,
 } from "../../plugins/conversation-binding.js";
 import { getGlobalPluginRegistry } from "../../plugins/hook-runner-global.js";
-import type { PluginCommandExecutionReplyOptions } from "../../plugins/plugin-command-runtime.js";
 import { resolveCommandAuthorization } from "../command-auth.js";
 import type { ReplyPayload } from "../reply-payload.js";
 import {
@@ -24,6 +23,10 @@ import {
   loadAbortRuntime,
   loadFastApproveRuntime,
 } from "./dispatch-from-config.runtime-loaders.js";
+import {
+  prepareObservedReplyTakeover,
+  readObservedReplyInputOwner,
+} from "./observed-reply-input.js";
 import { REPLY_ADMISSION_TICKET } from "./reply-admission-ticket.js";
 import { extractShortModelName } from "./response-prefix-template.js";
 
@@ -200,13 +203,7 @@ export async function prepareDispatchOperation(state: PrepareDispatchOperationCo
     }
     getSessionBindingService().touch(pluginOwnedBinding.bindingId, undefined, pluginOwnedBinding);
     params.replyOptions ??= {};
-    if (
-      shouldBypassPluginOwnedBindingForCommand(
-        ctx,
-        cfg,
-        params.replyOptions as PluginCommandExecutionReplyOptions,
-      )
-    ) {
+    if (shouldBypassPluginOwnedBindingForCommand(ctx, cfg, params.replyOptions)) {
       logVerbose(
         `plugin-bound inbound command escaped plugin binding (plugin=${pluginOwnedBinding.pluginId} session=${sessionKey ?? "unknown"}); falling through to command processing`,
       );
@@ -243,18 +240,36 @@ export async function prepareDispatchOperation(state: PrepareDispatchOperationCo
             if (isPreDispatchOperationAborted()) {
               throw new DispatchReplyOperationAbortedError();
             }
+            if (!(await prepareObservedReplyTakeover(state, state.pluginBindingSessionKey))) {
+              return { status: "handled" as const, result: { handled: true } };
+            }
+            if (isPreDispatchOperationAborted()) {
+              throw new DispatchReplyOperationAbortedError();
+            }
             const authorizedInboundClaimEvent = {
               ...state.hookState.inboundClaimEvent,
               senderIsOwner: bindingAuthorization.senderIsOwner,
             };
-            return await state.runWithDispatchLifecycleAdmission(
-              async () =>
-                await hookRunner.runInboundClaimForPluginOutcome(
-                  pluginOwnedBinding.pluginId,
-                  authorizedInboundClaimEvent,
-                  { ...state.hookState.inboundClaimContext, pluginBinding: pluginOwnedBinding },
-                ),
-            );
+            return await state.runWithDispatchLifecycleAdmission(async () => {
+              const submission =
+                params.replyOptions?.userTurnTranscriptRecorder?.beginSubmission?.();
+              const outcome = await hookRunner.runInboundClaimForPluginOutcome(
+                pluginOwnedBinding.pluginId,
+                authorizedInboundClaimEvent,
+                { ...state.hookState.inboundClaimContext, pluginBinding: pluginOwnedBinding },
+              );
+              if (
+                outcome.status === "missing_plugin" ||
+                outcome.status === "no_handler" ||
+                outcome.status === "declined" ||
+                (outcome.status === "error" && outcome.preflightError !== undefined)
+              ) {
+                submission?.rejectSubmission();
+              } else {
+                state.markInboundDedupeReplayUnsafe();
+              }
+              return outcome;
+            });
           })()
         : (() => {
             const pluginLoaded =
@@ -327,7 +342,9 @@ export async function prepareDispatchOperation(state: PrepareDispatchOperationCo
           break;
         }
         case "declined": {
-          const transcriptOwner = await persistPluginBindingUserTurn();
+          const transcriptOwner = readObservedReplyInputOwner(params.replyOptions)
+            ? undefined
+            : await persistPluginBindingUserTurn();
           await sendBindingNotice(
             { text: buildPluginBindingDeclinedText(pluginOwnedBinding) },
             "terminal",
@@ -336,16 +353,23 @@ export async function prepareDispatchOperation(state: PrepareDispatchOperationCo
           return await finishPluginBindingDispatch("declined");
         }
         case "error": {
-          const transcriptOwner = await persistPluginBindingUserTurn();
+          const observedInput = readObservedReplyInputOwner(params.replyOptions);
+          const transcriptOwner = observedInput ? undefined : await persistPluginBindingUserTurn();
           logVerbose(
             `plugin-bound inbound claim failed for ${pluginOwnedBinding.pluginId}: ${targetedClaimOutcome.error}`,
           );
           await sendBindingNotice(
-            { text: buildPluginBindingErrorText(pluginOwnedBinding) },
+            {
+              text:
+                targetedClaimOutcome.preflightError?.userMessage ??
+                buildPluginBindingErrorText(pluginOwnedBinding),
+            },
             "terminal",
             transcriptOwner,
           );
-          return await finishPluginBindingDispatch("error");
+          const result = await finishPluginBindingDispatch("error");
+          observedInput?.finish(targetedClaimOutcome.preflightError ? "cancelled" : "interrupted");
+          return result;
         }
       }
     }

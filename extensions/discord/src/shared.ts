@@ -141,6 +141,7 @@ export function createDiscordPluginBase(params: {
       nativeCommands: true,
     },
     commands: {
+      groupActivationModes: ["mention"],
       nativeCommandsAutoEnabled: true,
       nativeSkillsAutoEnabled: true,
       resolveNativeCommandName: ({ commandKey, defaultName }) =>

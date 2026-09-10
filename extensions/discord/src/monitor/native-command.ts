@@ -20,9 +20,14 @@ import type {
   PluginCommandNativeCandidate,
 } from "openclaw/plugin-sdk/plugin-command-runtime";
 import { resolveChunkMode, resolveTextChunkLimit } from "openclaw/plugin-sdk/reply-chunking";
+import { recordConversationObservation } from "openclaw/plugin-sdk/reply-history";
 import { getRuntimeConfigSnapshot } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { createSubsystemLogger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { resolveOpenProviderRuntimeGroupPolicy } from "openclaw/plugin-sdk/runtime-group-policy";
+import {
+  buildConversationIdentity,
+  resolveStorePath,
+} from "openclaw/plugin-sdk/session-store-runtime";
 import {
   resolveDiscordAccountAllowFrom,
   resolveDiscordAccountDmPolicy,
@@ -749,6 +754,31 @@ async function dispatchDiscordCommandInteraction(params: {
     },
     sender: { id: sender.id, name: sender.name, tag: sender.tag },
   });
+  if (!isDirectMessage && commandAuthorized && (commandName === "new" || commandName === "reset")) {
+    const conversation = buildConversationIdentity({
+      channel: "discord",
+      accountId: effectiveRoute.accountId,
+      kind: isGroupDm ? "group" : "channel",
+      peerId: channelId,
+      deliveryTarget: `channel:${channelId}`,
+      threadId: isThreadChannel ? channelId : undefined,
+      nativeChannelId: channelId,
+    });
+    if (!conversation) {
+      throw new Error("Discord native reset is missing its conversation identity");
+    }
+    ctxPayload.ConversationHistory = await recordConversationObservation(
+      {
+        agentId: effectiveRoute.agentId,
+        storePath: resolveStorePath(cfg.session?.store, { agentId: effectiveRoute.agentId }),
+      },
+      {
+        conversationRef: conversation.conversationRef,
+        sourceId: `interaction:${interactionId}`,
+        message: { text: prompt, timestamp: ctxPayload.Timestamp },
+      },
+    );
+  }
 
   const directStatusResult = await maybeDeliverDiscordDirectStatus({
     commandName,
@@ -764,8 +794,7 @@ async function dispatchDiscordCommandInteraction(params: {
     senderIsOwner: senderIsCommandOwner,
     isAuthorizedSender: commandAuthorized,
     isGroup: isGuild || isGroupDm,
-    defaultGroupActivation: () =>
-      !isGuild ? "always" : channelConfig?.requireMention === false ? "always" : "mention",
+    defaultGroupActivation: () => (isGuild || isGroupDm ? "mention" : "always"),
     interaction,
     mediaLocalRoots,
     preferFollowUp,

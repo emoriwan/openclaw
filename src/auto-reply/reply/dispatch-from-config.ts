@@ -1,5 +1,7 @@
 /** Main reply dispatch pipeline from finalized config/context to delivery payloads. */
+import { isAgentHarnessPreflightError } from "../../agents/harness/errors.js";
 import { withPluginRuntimeRegistryScope } from "../../plugins/runtime/gateway-request-scope.js";
+import { markReplyPayloadForSourceSuppressionDelivery } from "../reply-payload.js";
 import { isDispatchReplyOperationAbortedError } from "./dispatch-from-config.abort.js";
 import { createInboundMessageAuditTerminal } from "./dispatch-from-config.audit.js";
 import { chooseDispatchRoute } from "./dispatch-from-config.choose-route.js";
@@ -7,6 +9,7 @@ import { executeDispatch } from "./dispatch-from-config.execute.js";
 import { finalizeDispatchAndAudit } from "./dispatch-from-config.finalize.js";
 import { gatherDispatchRequest } from "./dispatch-from-config.gather.js";
 import { DispatchSessionRefreshRequiredError } from "./dispatch-from-config.lifecycle.js";
+import { shouldDeliverDespiteSourceReplySuppression } from "./dispatch-from-config.payloads.js";
 import { prepareDispatchOperationContext } from "./dispatch-from-config.prepare-context.js";
 import { prepareDispatchDelivery } from "./dispatch-from-config.prepare-delivery.js";
 import { prepareDispatchExecution } from "./dispatch-from-config.prepare-execution.js";
@@ -15,6 +18,7 @@ import type {
   DispatchFromConfigParams,
   DispatchFromConfigResult,
 } from "./dispatch-from-config.types.js";
+import { withObservedReplyInputOwner } from "./observed-reply-input.js";
 import { REPLY_ADMISSION_TICKET, reserveReplyAdmissionTicket } from "./reply-admission-ticket.js";
 import "./dispatch-from-config.events.js";
 
@@ -35,6 +39,21 @@ export async function dispatchLowLevelChannelReplyFromConfig(
 }
 
 async function dispatchReplyFromConfigWithQueuePolicy(
+  params: DispatchFromConfigParams,
+  allowActiveQueueResolution: boolean,
+): Promise<DispatchFromConfigResult> {
+  return await withObservedReplyInputOwner(
+    params.ctx.ConversationHistory,
+    params.replyOptions,
+    (replyOptions) =>
+      dispatchReplyFromConfigWithOwnedInput(
+        { ...params, replyOptions },
+        allowActiveQueueResolution,
+      ),
+  );
+}
+
+async function dispatchReplyFromConfigWithOwnedInput(
   params: DispatchFromConfigParams,
   allowActiveQueueResolution: boolean,
 ): Promise<DispatchFromConfigResult> {
@@ -135,24 +154,57 @@ async function dispatchReplyFromConfigInner(
       if (isDispatchReplyOperationAbortedError(err)) {
         return finishReplyOperationAbortedDispatch();
       }
-      if (inboundDedupeClaim.status === "claimed") {
-        if (errorState.turnAdoptionState?.adopted || errorState.inboundDedupeReplayUnsafe) {
-          inboundDedupeClaim.commit();
-        } else {
-          inboundDedupeClaim.release();
+      let inputFailureResult: DispatchFromConfigResult | undefined;
+      try {
+        if (isAgentHarnessPreflightError(err) && err.userMessage) {
+          let queuedFinal = false;
+          let routedFinalCount = 0;
+          const payload = markReplyPayloadForSourceSuppressionDelivery({
+            text: err.userMessage,
+            isError: true,
+          });
+          if (
+            !errorState.suppressAcpChildUserDelivery &&
+            (!errorState.suppressDelivery ||
+              shouldDeliverDespiteSourceReplySuppression(payload, errorState))
+          ) {
+            errorState.throwIfDispatchOperationAborted();
+            const routed = await errorState.routeReplyToOriginating(payload);
+            if (routed) {
+              queuedFinal = routed.ok;
+              routedFinalCount = errorState.isRoutedReplyDelivered(routed) ? 1 : 0;
+            } else {
+              errorState.markInboundDedupeReplayUnsafe();
+              queuedFinal = params.dispatcher.sendFinalReply(payload);
+            }
+          }
+          const counts = params.dispatcher.getQueuedCounts();
+          counts.final += routedFinalCount;
+          inputFailureResult = errorState.attachSourceReplyDeliveryMode({ queuedFinal, counts });
         }
+      } finally {
+        if (inboundDedupeClaim.status === "claimed") {
+          if (errorState.turnAdoptionState?.adopted || errorState.inboundDedupeReplayUnsafe) {
+            inboundDedupeClaim.commit();
+          } else {
+            inboundDedupeClaim.release();
+          }
+        }
+        if (err instanceof DispatchSessionRefreshRequiredError) {
+          // This attempt already incremented diagnostic queue depth before admission
+          // detected the rotated owner. Balance only that state transition; the
+          // refreshed attempt owns the single processed/audit terminal outcome.
+          markIdle("session_refresh");
+        } else {
+          recordAgentDispatchCompleted("error", { error: String(err) });
+          recordProcessed("error", { error: String(err) });
+          markIdle("message_error");
+        }
+        failDispatchReplyOperation(err);
       }
-      if (err instanceof DispatchSessionRefreshRequiredError) {
-        // This attempt already incremented diagnostic queue depth before admission
-        // detected the rotated owner. Balance only that state transition; the
-        // refreshed attempt owns the single processed/audit terminal outcome.
-        markIdle("session_refresh");
-      } else {
-        recordAgentDispatchCompleted("error", { error: String(err) });
-        recordProcessed("error", { error: String(err) });
-        markIdle("message_error");
+      if (inputFailureResult) {
+        return inputFailureResult;
       }
-      failDispatchReplyOperation(err);
       throw err;
     }
   });

@@ -76,7 +76,7 @@ flow:
                   threadId:
                     ref: config.threadId
                   text:
-                    expr: "`Reply exactly: ${config.replyMarker}`"
+                    expr: "`@openclaw Reply exactly: ${config.replyMarker}`"
               - waitForOutbound:
                   conversation:
                     id:

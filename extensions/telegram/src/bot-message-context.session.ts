@@ -20,14 +20,16 @@ import type {
 } from "openclaw/plugin-sdk/config-contracts";
 import { resolveChannelContextVisibilityMode } from "openclaw/plugin-sdk/context-visibility-runtime";
 import { timestampMsToIsoString } from "openclaw/plugin-sdk/number-runtime";
-import { createChannelHistoryWindow, type HistoryEntry } from "openclaw/plugin-sdk/reply-history";
+import type {
+  ConversationHistoryCapture,
+  ConversationHistoryMessage,
+} from "openclaw/plugin-sdk/reply-history";
 import type { ResolvedAgentRoute } from "openclaw/plugin-sdk/routing";
 import { logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
-import { evaluateSupplementalContextVisibility } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
-import type { NormalizedAllowFrom } from "./bot-access.js";
-import { isSenderAllowed, normalizeAllowFrom } from "./bot-access.js";
+import { createTelegramSupplementalContextChecker } from "./access-groups.js";
+import { normalizeAllowFrom } from "./bot-access.js";
 import type {
   TelegramMediaRef,
   TelegramMessageContextOptions,
@@ -56,14 +58,7 @@ import {
   resolveTelegramDirectToolPolicy,
   resolveTelegramGroupPromptSettings,
 } from "./group-config-helpers.js";
-import {
-  isTelegramHistoryEntryAfterAmbientWatermark,
-  isTelegramChatWindowPromptContext,
-  mergeTelegramGroupHistoryPromptContext,
-  recordTelegramGroupHistoryEntry,
-  retainTelegramGroupHistoryPromptContext,
-  selectTelegramGroupHistoryAfterLastSelf,
-} from "./group-history-window.js";
+import { isTelegramChatWindowPromptContext } from "./group-history-window.js";
 import { TELEGRAM_REPLY_CHAIN_MAX_DEPTH, type TelegramReplyChainEntry } from "./message-cache.js";
 import { resolveTelegramPromptMediaPath } from "./prompt-media-path.js";
 import { buildTelegramConversationId } from "./topic-conversation.js";
@@ -89,10 +84,8 @@ type TelegramMessageContextSessionRuntime =
 
 const sessionRuntimeMethods = [
   "buildChannelInboundEventContext",
-  "readAmbientTranscriptWatermark",
   "readSessionUpdatedAt",
   "recordInboundSession",
-  "resolveAmbientTranscriptWatermarkKey",
   "resolveInboundLastRouteSessionKey",
   "resolvePinnedMainDmOwnerFromAllowlist",
   "resolveStorePath",
@@ -237,15 +230,14 @@ export async function buildTelegramInboundContextPayload(params: {
   rawBody: string;
   bodyText: string;
   historyKey?: string;
-  historyLimit: number;
   dmHistoryLimit: number;
-  groupHistories: Map<string, HistoryEntry[]>;
   groupConfig?: TelegramGroupConfig | TelegramDirectConfig;
   topicConfig?: TelegramTopicConfig;
   effectiveWasMentioned: boolean;
   inboundEventKind: InboundEventKind;
   groupRequireMention: boolean;
   mentionFacts: TelegramMentionFacts;
+  conversationHistory?: ConversationHistoryCapture;
   hasControlCommand: boolean;
   stickerCacheHit?: boolean;
   audioTranscribedMediaIndex?: number;
@@ -253,7 +245,7 @@ export async function buildTelegramInboundContextPayload(params: {
   locationData?: NormalizedLocation;
   options?: TelegramMessageContextOptions;
   dmAllowFrom?: Array<string | number>;
-  effectiveGroupAllow?: NormalizedAllowFrom;
+  groupAllowFrom?: Array<string | number>;
   topicName?: string;
   sessionRuntime?: TelegramMessageContextSessionRuntimeOverrides;
 }): Promise<{
@@ -289,16 +281,14 @@ export async function buildTelegramInboundContextPayload(params: {
     route,
     rawBody,
     bodyText,
-    historyKey,
-    historyLimit,
     dmHistoryLimit,
-    groupHistories,
     groupConfig,
     topicConfig,
     effectiveWasMentioned,
     inboundEventKind,
     groupRequireMention,
     mentionFacts,
+    conversationHistory,
     hasControlCommand,
     stickerCacheHit,
     audioTranscribedMediaIndex,
@@ -306,7 +296,7 @@ export async function buildTelegramInboundContextPayload(params: {
     locationData,
     options,
     dmAllowFrom,
-    effectiveGroupAllow,
+    groupAllowFrom,
     topicName,
     sessionRuntime: sessionRuntimeOverride,
   } = params;
@@ -321,62 +311,48 @@ export async function buildTelegramInboundContextPayload(params: {
     channel: "telegram",
     accountId: route.accountId,
   });
-  const shouldIncludeGroupSupplementalContext = (paramsLocal: {
-    kind: "quote" | "forwarded";
-    senderId?: string;
-    senderUsername?: string;
-  }): boolean => {
-    if (!isGroup) {
-      return true;
-    }
-    const senderAllowed = effectiveGroupAllow?.hasEntries
-      ? isSenderAllowed({
-          allow: effectiveGroupAllow,
-          senderId: paramsLocal.senderId,
-          senderUsername: paramsLocal.senderUsername,
-        })
-      : true;
-    return evaluateSupplementalContextVisibility({
-      mode: contextVisibilityMode,
-      kind: paramsLocal.kind,
-      senderAllowed,
-    }).include;
-  };
+  const shouldIncludeGroupSupplementalContext = createTelegramSupplementalContextChecker({
+    cfg,
+    allowFrom: groupAllowFrom,
+    accountId: route.accountId,
+    isGroup,
+    mode: contextVisibilityMode,
+  });
   // Single owner for reply-target visibility so every buffered message in a
   // synthetic batch is gated identically to the lone-message case. Without one
   // owner, only the synthetic (first) message's reply/quote survives the merge.
-  const resolveVisibleReplyTarget = (
+  const resolveVisibleReplyTarget = async (
     target: TelegramReplyTarget | null,
-  ): TelegramReplyTarget | null => {
+  ): Promise<TelegramReplyTarget | null> => {
     if (
       !target ||
-      !shouldIncludeGroupSupplementalContext({
+      !(await shouldIncludeGroupSupplementalContext({
         kind: "quote",
         senderId: target.senderId,
         senderUsername: target.senderUsername,
-      })
+      }))
     ) {
       return null;
     }
     const forwardedFrom =
       target.forwardedFrom &&
-      shouldIncludeGroupSupplementalContext({
+      (await shouldIncludeGroupSupplementalContext({
         kind: "forwarded",
         senderId: target.forwardedFrom.fromId,
         senderUsername: target.forwardedFrom.fromUsername,
-      })
+      }))
         ? target.forwardedFrom
         : undefined;
     return { ...target, forwardedFrom };
   };
   const includeForwardOrigin = forwardOrigin
-    ? shouldIncludeGroupSupplementalContext({
+    ? await shouldIncludeGroupSupplementalContext({
         kind: "forwarded",
         senderId: forwardOrigin.fromId,
         senderUsername: forwardOrigin.fromUsername,
       })
     : false;
-  const visibleReplyTarget = resolveVisibleReplyTarget(replyTarget);
+  const visibleReplyTarget = await resolveVisibleReplyTarget(replyTarget);
   const visibleReplyTargetEntry = visibleReplyTarget
     ? replyTargetToChainEntry(visibleReplyTarget)
     : undefined;
@@ -407,7 +383,7 @@ export async function buildTelegramInboundContextPayload(params: {
     if (!bufferedMessage) {
       continue;
     }
-    const visible = resolveVisibleReplyTarget(describeReplyTarget(bufferedMessage));
+    const visible = await resolveVisibleReplyTarget(describeReplyTarget(bufferedMessage));
     appendReplyChainEntry(visible ? replyTargetToChainEntry(visible) : undefined);
   }
   for (const entry of inheritedReplyChain) {
@@ -416,7 +392,8 @@ export async function buildTelegramInboundContextPayload(params: {
     }
     appendReplyChainEntry(entry);
   }
-  const visibleReplyChain = rawReplyChain.flatMap((entry) => {
+  const visibleReplyChain: TelegramReplyChainEntry[] = [];
+  for (const entry of rawReplyChain) {
     const selectedReplyEntry =
       entry.messageId === visibleReplyTargetEntry?.messageId ? visibleReplyTargetEntry : undefined;
     const visibleEntry = {
@@ -428,55 +405,58 @@ export async function buildTelegramInboundContextPayload(params: {
       senderUsername: entry.senderUsername,
     };
     if (
-      !shouldIncludeGroupSupplementalContext({
+      !(await shouldIncludeGroupSupplementalContext({
         kind: "quote",
         senderId: visibleEntry.senderId,
         senderUsername: visibleEntry.senderUsername,
-      })
+      }))
     ) {
-      return [];
+      continue;
     }
     const includeForwarded =
       visibleEntry.forwardedFrom &&
-      shouldIncludeGroupSupplementalContext({
+      (await shouldIncludeGroupSupplementalContext({
         kind: "forwarded",
         senderId: visibleEntry.forwardedFromId,
         senderUsername: visibleEntry.forwardedFromUsername,
-      });
-    return [includeForwarded ? visibleEntry : stripReplyChainForwarded(visibleEntry)];
-  });
+      }));
+    visibleReplyChain.push(
+      includeForwarded ? visibleEntry : stripReplyChainForwarded(visibleEntry),
+    );
+  }
   const visibleForwardOrigin = includeForwardOrigin ? forwardOrigin : null;
-  const bufferedBodySegments = shouldRenderBufferedBody
-    ? bufferedMessages.flatMap((bufferedMessage) => {
-        const bufferedMedia = resolveTelegramPrimaryMedia(bufferedMessage);
-        const textParts = getTelegramTextParts(bufferedMessage);
-        const segmentBody =
-          renderTelegramTextEntities(textParts.text, textParts.entities) ||
-          formatMediaPlaceholderText(bufferedMedia ? [{ kind: bufferedMedia.kind }] : []);
-        if (!segmentBody) {
-          return [];
-        }
-        const bufferedForwardOrigin = normalizeForwardedContext(bufferedMessage);
-        const visibleBufferedForwardOrigin =
-          bufferedForwardOrigin &&
-          shouldIncludeGroupSupplementalContext({
-            kind: "forwarded",
-            senderId: bufferedForwardOrigin.fromId,
-            senderUsername: bufferedForwardOrigin.fromUsername,
-          })
-            ? bufferedForwardOrigin
-            : null;
-        return [
-          formatTelegramForwardedMessageBody({
-            body: segmentBody,
-            forwardedFrom: visibleBufferedForwardOrigin?.from,
-            forwardedDate: visibleBufferedForwardOrigin?.date
-              ? visibleBufferedForwardOrigin.date * 1000
-              : undefined,
-          }),
-        ];
-      })
-    : undefined;
+  const bufferedBodySegments: string[] = [];
+  if (shouldRenderBufferedBody) {
+    for (const bufferedMessage of bufferedMessages) {
+      const bufferedMedia = resolveTelegramPrimaryMedia(bufferedMessage);
+      const textParts = getTelegramTextParts(bufferedMessage);
+      const segmentBody =
+        renderTelegramTextEntities(textParts.text, textParts.entities) ||
+        formatMediaPlaceholderText(bufferedMedia ? [{ kind: bufferedMedia.kind }] : []);
+      if (!segmentBody) {
+        continue;
+      }
+      const bufferedForwardOrigin = normalizeForwardedContext(bufferedMessage);
+      const visibleBufferedForwardOrigin =
+        bufferedForwardOrigin &&
+        (await shouldIncludeGroupSupplementalContext({
+          kind: "forwarded",
+          senderId: bufferedForwardOrigin.fromId,
+          senderUsername: bufferedForwardOrigin.fromUsername,
+        }))
+          ? bufferedForwardOrigin
+          : null;
+      bufferedBodySegments.push(
+        formatTelegramForwardedMessageBody({
+          body: segmentBody,
+          forwardedFrom: visibleBufferedForwardOrigin?.from,
+          forwardedDate: visibleBufferedForwardOrigin?.date
+            ? visibleBufferedForwardOrigin.date * 1000
+            : undefined,
+        }),
+      );
+    }
+  }
   const visibleBodyText = bufferedBodySegments?.length
     ? bufferedBodySegments.join("\n")
     : formatTelegramForwardedMessageBody({
@@ -524,22 +504,6 @@ export async function buildTelegramInboundContextPayload(params: {
     storePath,
     sessionKey: route.sessionKey,
   });
-  const ambientTranscriptWatermarkKey =
-    isGroup && historyKey
-      ? sessionRuntime.resolveAmbientTranscriptWatermarkKey({
-          channel: "telegram",
-          accountId: route.accountId,
-          conversationId: String(chatId),
-          ...(resolvedThreadId !== undefined ? { threadId: resolvedThreadId } : {}),
-        })
-      : undefined;
-  const ambientTranscriptWatermark = ambientTranscriptWatermarkKey
-    ? sessionRuntime.readAmbientTranscriptWatermark({
-        storePath,
-        sessionKey: route.sessionKey,
-        key: ambientTranscriptWatermarkKey,
-      })
-    : undefined;
   const shouldSuppressPersistedDmChatWindowContext =
     !isGroup &&
     previousTimestamp !== undefined &&
@@ -565,7 +529,6 @@ export async function buildTelegramInboundContextPayload(params: {
     previousTimestamp,
     envelope: envelopeOptions,
   });
-  const hasGroupHistoryContext = isGroup;
   const commandBody = normalizeCommandBody(rawBody, {
     botUsername: normalizeOptionalLowercaseString(primaryCtx.me?.username),
     // Preserve multiline text-directive arguments for the core boundary (#138545);
@@ -576,35 +539,9 @@ export async function buildTelegramInboundContextPayload(params: {
     options?.commandSource ??
     (commandAuthorized && hasControlCommand ? ("text" as const) : undefined);
   const conversationKind = isGroup ? "group" : "direct";
-  let watermarkedGroupHistoryEntries: HistoryEntry[] | undefined;
-  let groupHistoryPromptEntries: HistoryEntry[] = [];
-  if (hasGroupHistoryContext && historyKey && historyLimit > 0) {
-    const bufferedHistoryCount = groupHistories.get(historyKey)?.length ?? 0;
-    const fullGroupHistoryEntries = (
-      createChannelHistoryWindow({ historyMap: groupHistories }).buildInboundHistory({
-        historyKey,
-        limit: bufferedHistoryCount,
-      }) ?? []
-    )
-      .filter((entry) =>
-        isTelegramHistoryEntryAfterAmbientWatermark(entry, ambientTranscriptWatermark),
-      )
-      .slice(-historyLimit);
-    watermarkedGroupHistoryEntries =
-      selectTelegramGroupHistoryAfterLastSelf(fullGroupHistoryEntries).slice(-historyLimit);
-    groupHistoryPromptEntries =
-      inboundEventKind === "room_event" ? fullGroupHistoryEntries : watermarkedGroupHistoryEntries;
-  }
-  const retainedVisiblePromptContext = hasGroupHistoryContext
-    ? retainTelegramGroupHistoryPromptContext({
-        promptContext: baseVisiblePromptContext,
-        entries: groupHistoryPromptEntries,
-      })
+  const visiblePromptContext = isGroup
+    ? baseVisiblePromptContext.filter((entry) => !isTelegramChatWindowPromptContext(entry))
     : baseVisiblePromptContext;
-  const visiblePromptContext = mergeTelegramGroupHistoryPromptContext({
-    promptContext: retainedVisiblePromptContext,
-    entries: groupHistoryPromptEntries,
-  });
 
   const { skillFilter, groupSystemPrompt } = resolveTelegramGroupPromptSettings({
     groupConfig,
@@ -669,12 +606,6 @@ export async function buildTelegramInboundContextPayload(params: {
             ? "channel_post"
             : undefined
     : undefined;
-  const inboundHistory =
-    hasGroupHistoryContext && historyKey && historyLimit > 0
-      ? groupHistoryPromptEntries.length > 0
-        ? groupHistoryPromptEntries
-        : undefined
-      : undefined;
   const messageId = options?.messageIdOverride ?? String(msg.message_id);
   const ingressContextBinding = Object.freeze({
     agentId: route.agentId,
@@ -740,16 +671,17 @@ export async function buildTelegramInboundContextPayload(params: {
         shouldRenderBufferedBody ? visibleBodyText : bodyText,
       ),
       commandBody,
-      inboundHistory,
       sourceModality: msg.voice ? "voice" : undefined,
     },
-    sessionTranscript: {
-      chatWindow: true,
-      historyLimit: isGroup ? historyLimit : dmHistoryLimit,
-      beforeTimestampMs: options?.receivedAtMs ?? (msg.date ? msg.date * 1000 : undefined),
-      minTimestampMs: options?.promptContextMinTimestampMs,
-      senderLabels: { assistant: "OpenClaw", user: "User" },
-    },
+    sessionTranscript: isGroup
+      ? undefined
+      : {
+          chatWindow: true,
+          historyLimit: dmHistoryLimit,
+          beforeTimestampMs: options?.receivedAtMs ?? (msg.date ? msg.date * 1000 : undefined),
+          minTimestampMs: options?.promptContextMinTimestampMs,
+          senderLabels: { assistant: "OpenClaw", user: "User" },
+        },
     access: {
       commands: {
         authorized: commandAuthorized,
@@ -807,18 +739,20 @@ export async function buildTelegramInboundContextPayload(params: {
     contextVisibility: contextVisibilityMode,
     extra: {
       BotUsername: primaryCtx.me?.username ?? undefined,
-      AmbientTranscriptWatermarkKey: ambientTranscriptWatermarkKey,
-      AmbientTranscriptBody: options?.ambientTranscriptBody,
-      AmbientTranscriptMessageId: ambientTranscriptWatermarkKey
-        ? (options?.messageIdOverride ?? String(msg.message_id))
+      ConversationHistory: conversationHistory
+        ? {
+            ...conversationHistory,
+            includeMessage: (
+              message: ConversationHistoryMessage,
+              kind: "history" | "quote" = "history",
+            ) =>
+              shouldIncludeGroupSupplementalContext({
+                kind,
+                senderId: message.sender?.id ?? undefined,
+                senderUsername: message.sender?.username ?? undefined,
+              }),
+          }
         : undefined,
-      AmbientTranscriptTimestampMs: ambientTranscriptWatermarkKey
-        ? msg.date
-          ? msg.date * 1000
-          : undefined
-        : undefined,
-      AmbientTranscriptPreviousMessageId: ambientTranscriptWatermark?.messageId,
-      AmbientTranscriptPreviousTimestampMs: ambientTranscriptWatermark?.timestampMs,
       GroupSubject: isGroup ? (msg.chat.title ?? undefined) : undefined,
       GroupRequireMention: isGroup ? groupRequireMention : undefined,
       ReplyChain: visibleReplyChain.length > 0 ? visibleReplyChain : undefined,
@@ -862,23 +796,6 @@ export async function buildTelegramInboundContextPayload(params: {
       TopicName: isForum && topicName ? topicName : undefined,
     },
   } satisfies BuildChannelInboundEventContextAsyncParams);
-  if (isGroup && historyKey) {
-    recordTelegramGroupHistoryEntry({
-      historyMap: groupHistories,
-      historyKey,
-      limit: historyLimit,
-      entry: {
-        sender: buildSenderLabel(msg, senderId || chatId),
-        body:
-          rawBody ||
-          (stickerCacheHit ? bodyText : undefined) ||
-          formatMediaPlaceholderText(currentMediaFacts),
-        timestamp: msg.date ? msg.date * 1000 : undefined,
-        messageId: typeof msg.message_id === "number" ? String(msg.message_id) : undefined,
-      },
-    });
-  }
-
   const pinnedMainDmOwner = !isGroup
     ? sessionRuntime.resolvePinnedMainDmOwnerFromAllowlist({
         dmScope: cfg.session?.dmScope,

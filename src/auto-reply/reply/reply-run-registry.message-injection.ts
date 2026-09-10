@@ -248,12 +248,12 @@ export function beginReplyMessageInjectionTarget(
   // Invoke before the first await. The capability owns the final synchronous
   // admission check, matching Codex's active-turn lock boundary.
   const acceptance = createDeferredCore<boolean>();
-  let acceptanceSettled = false;
+  let acceptanceValue: boolean | undefined;
   const settleAcceptance = (accepted: boolean) => {
-    if (acceptanceSettled) {
+    if (acceptanceValue !== undefined) {
       return;
     }
-    acceptanceSettled = true;
+    acceptanceValue = accepted;
     acceptance.resolve(accepted);
     queueOptions?.onQueueAccepted?.(accepted);
   };
@@ -267,16 +267,24 @@ export function beginReplyMessageInjectionTarget(
       }
     },
   };
+  let submission: { rejectSubmission(): void } | undefined;
   const failed = (error: unknown): ReplyMessageInjectionOutcome => {
-    if (error instanceof QuestionAnswerUnconfirmedError) {
+    if (error instanceof QuestionAnswerUnconfirmedError || acceptanceValue === true) {
       settleAcceptance(true);
-      return { status: "indeterminate", errorMessage: error.message };
+      return {
+        status: "indeterminate",
+        errorMessage: error instanceof Error ? error.message : String(error),
+      };
     }
+    submission?.rejectSubmission();
     settleAcceptance(false);
     return { status: "rejected", reason: "runtime_rejected", errorMessage: String(error) };
   };
   let queued: Promise<void | ReplyBackendQueueMessageResult>;
   try {
+    // Persist uncertainty before the backend can accept input. A crash between
+    // acceptance and transcript commitment must never make this input replayable.
+    submission = userTurnTranscriptRecorder?.beginSubmission?.();
     queued = resolved.injection.queueMessage(text, runtimeQueueOptions);
   } catch (error) {
     return {

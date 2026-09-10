@@ -2484,7 +2484,7 @@ describe("reply run registry", () => {
     delivery.reject(new Error("transcript unconfirmed"));
 
     await expect(attempt.acceptance).resolves.toBe(true);
-    await expect(attempt.outcome).resolves.toMatchObject({ status: "rejected" });
+    await expect(attempt.outcome).resolves.toMatchObject({ status: "indeterminate" });
   });
 
   it("rejects an ABA successor even when key and leaf are reused", async () => {

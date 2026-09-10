@@ -25,12 +25,21 @@ describe("buildPersistedUserTurnMediaInputsFromFields", () => {
     ]);
   });
 
-  it("resolves relative canonical paths against each fact workspace", () => {
+  it("keeps identity and lazy-media flags while resolving each fact workspace", () => {
     const workspaceDir = "/tmp/openclaw-user-turn-workspace";
     expect(
       buildPersistedUserTurnMediaInputsFromFields({
         __openclaw: {
-          media: [{ path: "media/inbound/a.png", contentType: "image/png", workspaceDir }],
+          media: [
+            {
+              path: "media/inbound/a.png",
+              contentType: "image/png",
+              workspaceDir,
+              messageId: "original-message",
+              hydrationSuppressed: true,
+              contextOnly: true,
+            },
+          ],
         },
       } as never),
     ).toEqual([
@@ -38,6 +47,10 @@ describe("buildPersistedUserTurnMediaInputsFromFields", () => {
         path: path.join(workspaceDir, "media/inbound/a.png"),
         contentType: "image/png",
         kind: "image",
+        workspaceDir,
+        messageId: "original-message",
+        hydrationSuppressed: true,
+        contextOnly: true,
       },
     ]);
   });

@@ -377,5 +377,10 @@ export async function executeTelegramBuiltinCommand(
     });
     return false;
   }
-  return await dispatchTelegramBuiltinTurn({ dispatch, prompt, commandArgs });
+  return await dispatchTelegramBuiltinTurn({
+    dispatch,
+    commandName: params.commandName,
+    prompt,
+    commandArgs,
+  });
 }

@@ -78,19 +78,21 @@ describe("processDiscordMessage reply session init conflict retry", () => {
   const conflictError = () =>
     new Error("reply session initialization conflicted for agent:main:discord:channel:c1");
 
-  it("retries only dispatch while recording, acknowledging, and adding history once", async () => {
+  it("retries only dispatch while keeping the request capture and acknowledging once", async () => {
     const sleepSpy = vi.mocked(sleepWithAbort).mockResolvedValue(undefined);
     dispatchInboundMessage
       .mockRejectedValueOnce(conflictError())
       .mockRejectedValueOnce(conflictError())
       .mockResolvedValueOnce(createNoQueuedDispatchResult());
-    const guildHistories = new Map();
+    const conversationHistory = {
+      conversationRef: "conv_discord_room",
+      throughSequence: 4,
+      requestSourceIds: ["m1"],
+    };
     const ctx = await createBaseContext({
-      guildHistories,
-      historyLimit: 10,
-      shouldRequireMention: false,
-      effectiveWasMentioned: false,
-      inboundEventKind: "room_event",
+      conversationHistory,
+      effectiveWasMentioned: true,
+      inboundEventKind: "user_request",
       ackReactionScope: "all",
       cfg: {
         messages: {
@@ -109,11 +111,9 @@ describe("processDiscordMessage reply session init conflict retry", () => {
     expect(sleepSpy).toHaveBeenNthCalledWith(2, 1_000, undefined);
     expect(recordInboundSession).toHaveBeenCalledTimes(1);
     expect(getReactionEmojis()).toEqual(["👀"]);
-    expect(guildHistories.get("c1")).toHaveLength(1);
-    expect(guildHistories.get("c1")?.[0]).toMatchObject({
-      body: "hi",
-      messageId: "m1",
-    });
+    expect(dispatchInboundMessage.mock.calls.at(-1)?.[0]?.ctx?.ConversationHistory).toMatchObject(
+      conversationHistory,
+    );
     sleepSpy.mockRestore();
   });
 
@@ -218,31 +218,6 @@ describe("processDiscordMessage reply session init conflict retry", () => {
     expect(thrown).toMatchObject({ cause: expect.any(Error) });
     expect(dispatchInboundMessage).toHaveBeenCalledTimes(4);
     expect(deliverDiscordReply).toHaveBeenCalledTimes(1);
-    sleepSpy.mockRestore();
-  });
-
-  it("rebuilds a released replay without duplicating its pending history", async () => {
-    const sleepSpy = vi.mocked(sleepWithAbort).mockResolvedValue(undefined);
-    dispatchInboundMessage.mockRejectedValueOnce(new Error("dispatch failed before completion"));
-    const guildHistories = new Map();
-    const createReplayContext = () =>
-      createBaseContext({
-        guildHistories,
-        historyLimit: 10,
-        inboundEventKind: "room_event",
-      });
-
-    await expect(runProcessDiscordMessage(await createReplayContext())).rejects.toBeInstanceOf(
-      Error,
-    );
-    expect(guildHistories.get("c1")).toHaveLength(1);
-
-    dispatchInboundMessage.mockResolvedValue(createNoQueuedDispatchResult());
-    await runProcessDiscordMessage(await createReplayContext());
-
-    expect(getLastDispatchCtx()?.Body).not.toContain("[Chat messages since your last reply");
-    expect(guildHistories.get("c1")).toHaveLength(1);
-    expect(guildHistories.get("c1")?.[0]?.messageId).toBe("m1");
     sleepSpy.mockRestore();
   });
 

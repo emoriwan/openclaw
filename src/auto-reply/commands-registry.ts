@@ -96,6 +96,29 @@ function supportsNativeProvider(command: ChatCommandDefinition, provider?: strin
   );
 }
 
+/** Native choices and descriptions must reflect the channel's supported command modes. */
+function resolveNativeCommandArgs(
+  command: ChatCommandDefinition,
+  provider?: string,
+  options?: NativeCommandProviderLookupOptions,
+): CommandArgDefinition[] | undefined {
+  if (command.key !== "activation" || !provider) {
+    return command.args;
+  }
+  const modes = (
+    options?.includeBundledChannelFallback === false
+      ? getLoadedChannelPlugin(provider)
+      : getChannelPlugin(provider)
+  )?.commands?.groupActivationModes;
+  return modes
+    ? command.args?.map((arg) =>
+        arg.name === "mode"
+          ? { ...arg, choices: [...modes], description: modes.join(" or ") }
+          : arg,
+      )
+    : command.args;
+}
+
 function listNativeSpecsFromCommands(
   commands: ChatCommandDefinition[],
   provider?: string,
@@ -119,7 +142,7 @@ function listNativeSpecsFromCommands(
           nativeSpec.isAlias = true;
         }
         if (command.args) {
-          nativeSpec.args = command.args;
+          nativeSpec.args = resolveNativeCommandArgs(command, provider, options);
         }
         if (command.descriptionLocalizations) {
           nativeSpec.descriptionLocalizations = command.descriptionLocalizations;
@@ -199,12 +222,17 @@ export function findCommandByNativeName(
     return undefined;
   }
   const mapNativeCommandNames = createNativeCommandNameMapper(provider, options);
-  return getChatCommands().find(
-    (command) =>
-      command.scope !== "text" &&
-      supportsNativeProvider(command, provider) &&
-      mapNativeCommandNames(command).some(({ normalizedName }) => normalizedName === normalized),
+  const command = getChatCommands().find(
+    (candidate) =>
+      candidate.scope !== "text" &&
+      supportsNativeProvider(candidate, provider) &&
+      mapNativeCommandNames(candidate).some(({ normalizedName }) => normalizedName === normalized),
   );
+  if (!command) {
+    return undefined;
+  }
+  const args = resolveNativeCommandArgs(command, provider, options);
+  return args === command.args ? command : { ...command, args };
 }
 
 /** Returns true only when the command owner permits handler work beside an active run. */

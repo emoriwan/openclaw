@@ -22,11 +22,6 @@ export const telegramChannelConfigUiHints = {
     channelLabel: "Telegram",
     dmPolicy: { channelKey: "telegram" },
     configWrites: true,
-    mentionPatterns: {
-      targetDescription: "Telegram group chat IDs or chatId:topic:threadId topic IDs",
-      policyNote: "Native Telegram bot mentions still trigger even when regex patterns are denied.",
-      denyNote: "Native bot mentions still trigger.",
-    },
     nativeCommands: true,
     streaming: {
       "": 'Unified Telegram stream preview mode: "off" | "partial" | "block" | "progress" (default: "progress"). "progress" keeps a single editable progress draft until final delivery. Legacy boolean/streamMode keys are detected; run doctor --fix to migrate.',
@@ -49,6 +44,32 @@ export const telegramChannelConfigUiHints = {
     },
     progress: { includeCommentary: true, commentaryOrder: "after-command" },
   }),
+  historyLimit: {
+    label: "Telegram Legacy Group History Limit",
+    help: "Accepted for existing configs. Telegram retains unread group text until an addressed request captures it; this setting no longer limits that context. DM history limits still apply.",
+  },
+  "groups.*.requireMention": {
+    label: "Telegram Legacy Group Mention Setting",
+    help: "Accepted for existing configs. Groups always require a native tag or reply to the bot, or a bot-owned interaction. Setting false no longer enables ambient replies.",
+  },
+  "groups.*.topics.*.requireMention": {
+    label: "Telegram Legacy Topic Mention Setting",
+    help: "Accepted for existing configs. Topics always require a native tag or reply to the bot, or a bot-owned interaction. Setting false no longer enables ambient replies.",
+  },
+  ...Object.fromEntries(
+    [
+      "mentionPatterns",
+      "mentionPatterns.mode",
+      "mentionPatterns.allowIn",
+      "mentionPatterns.denyIn",
+    ].map((key) => [
+      key,
+      {
+        label: "Telegram Legacy Mention Pattern Policy",
+        help: "Accepted for existing configs. Text patterns no longer start Telegram group turns; use a native tag or reply to the bot.",
+      },
+    ]),
+  ),
   richMessages: {
     label: "Telegram Rich Messages",
     help: "Opt into Bot API 10.3 rich text sends and edits, including native tables and rich media. Default: false because some current Telegram clients render these messages as unsupported.",

@@ -2,25 +2,7 @@
 import { buildChannelInboundEventContext } from "openclaw/plugin-sdk/channel-inbound";
 import { describe, expect, it, vi } from "vitest";
 import { buildDiscordMessageProcessContext } from "./message-handler.context.js";
-import type { DiscordHistoryEntry } from "./message-handler.history.js";
 import { createBaseDiscordMessageContext } from "./message-handler.test-harness.js";
-
-function historyEntry(params: {
-  id: string;
-  senderId: string;
-  sender: string;
-  body: string;
-}): DiscordHistoryEntry {
-  return {
-    sender: params.sender,
-    body: params.body,
-    messageId: params.id,
-    senderProvenance: Object.freeze({
-      id: params.senderId,
-      memberRoleIds: Object.freeze([]),
-    }),
-  };
-}
 
 describe("discord buildDiscordMessageProcessContext sender bot status", () => {
   it("preserves the native Discord channel id for tool authorization", async () => {
@@ -58,7 +40,13 @@ describe("discord buildDiscordMessageProcessContext sender bot status", () => {
   });
 
   it("records the source channel as the parent of an auto-threaded turn", async () => {
+    const conversationHistory = {
+      conversationRef: "conv_source_room",
+      throughSequence: 3,
+      requestSourceIds: ["m1"],
+    };
     const ctx = await createBaseDiscordMessageContext({
+      conversationHistory,
       channelConfig: { allowed: true, autoThread: true },
       client: {
         rest: {
@@ -71,6 +59,7 @@ describe("discord buildDiscordMessageProcessContext sender bot status", () => {
 
     expect(result?.ctxPayload.MessageThreadId).toBe("auto-thread-1");
     expect(result?.ctxPayload.ThreadParentId).toBe("c1");
+    expect(result?.ctxPayload.ConversationHistory).toMatchObject(conversationHistory);
   });
 
   it("builds the payload through the host channel context builder when one is supplied", async () => {
@@ -126,54 +115,6 @@ describe("discord buildDiscordMessageProcessContext sender bot status", () => {
     expect(result.ctxPayload.SenderIsBot).toBeUndefined();
   });
 
-  it("does not duplicate forwarded media already rendered in room-event history text", async () => {
-    const guildHistories = new Map();
-    const forwardedText = "[Forwarded message]\n<media:image>";
-    const ctx = await createBaseDiscordMessageContext({
-      guildHistories,
-      historyLimit: 10,
-      inboundEventKind: "room_event",
-      sender: { id: "U1", label: "user", name: "alice", isPluralKit: false },
-      message: {
-        id: "m-forwarded",
-        channelId: "c1",
-        timestamp: new Date().toISOString(),
-        attachments: [],
-        message_snapshots: [
-          {
-            message: {
-              attachments: [
-                {
-                  id: "forwarded-image",
-                  filename: "forwarded.png",
-                  content_type: "image/png",
-                  url: "https://cdn.discordapp.com/forwarded.png",
-                },
-              ],
-            },
-          },
-        ],
-      },
-    });
-
-    await buildDiscordMessageProcessContext({
-      ctx,
-      text: forwardedText,
-      mediaList: [{ path: "/tmp/forwarded.png", contentType: "image/png", kind: "image" }],
-    });
-
-    expect(guildHistories.get("c1")?.[0]?.body).toBe(forwardedText);
-    expect(guildHistories.get("c1")?.[0]?.senderProvenance).toEqual({
-      id: "U1",
-      name: "alice",
-      memberRoleIds: [],
-    });
-    expect(Object.isFrozen(guildHistories.get("c1")?.[0]?.senderProvenance)).toBe(true);
-    expect(Object.isFrozen(guildHistories.get("c1")?.[0]?.senderProvenance.memberRoleIds)).toBe(
-      true,
-    );
-  });
-
   it.each(["", "Please summarize"])(
     "sends forwarded snapshot text with caption %j without treating it as a command",
     async (baseText) => {
@@ -198,20 +139,48 @@ describe("discord buildDiscordMessageProcessContext sender bot status", () => {
     },
   );
 
-  it("filters pending and inbound history by sender provenance in allowlist mode", async () => {
-    const guildHistories = new Map<string, DiscordHistoryEntry[]>([
-      [
-        "c1",
-        [
-          historyEntry({ id: "allowed", senderId: "111", sender: "Alice", body: "allowed body" }),
-          historyEntry({ id: "blocked", senderId: "222", sender: "Mallory", body: "blocked body" }),
-        ],
-      ],
-    ]);
+  it.each(["allowlist", "allowlist_quote"] as const)(
+    "keeps the current sender and role policy on the durable capture in %s mode",
+    async (contextVisibility) => {
+      const ctx = await createBaseDiscordMessageContext({
+        cfg: { channels: { discord: { contextVisibility } } },
+        conversationHistory: {
+          conversationRef: "conv_room",
+          throughSequence: 3,
+          requestSourceIds: ["m1"],
+        },
+        channelConfig: { allowed: true, users: ["111"], roles: ["333"] },
+      });
+
+      const result = await buildDiscordMessageProcessContext({
+        ctx,
+        text: "current",
+        mediaList: [],
+      });
+      if (!result) {
+        throw new Error("expected a built Discord message context");
+      }
+
+      const include = result.ctxPayload.ConversationHistory?.includeMessage;
+      expect(include?.({ text: "allowed body", sender: { id: "111" } })).toBe(true);
+      expect(include?.({ text: "blocked body", sender: { id: "222" } })).toBe(false);
+      expect(include?.({ text: "quoted body", sender: { id: "222" } }, "quote")).toBe(
+        contextVisibility === "allowlist_quote",
+      );
+      expect(include?.({ text: "role body", sender: { id: "222" }, senderRoles: ["333"] })).toBe(
+        true,
+      );
+      expect(result.ctxPayload.InboundHistory).toBeUndefined();
+    },
+  );
+
+  it("keeps observed history visible under the default visibility mode", async () => {
     const ctx = await createBaseDiscordMessageContext({
-      cfg: { channels: { discord: { contextVisibility: "allowlist" } } },
-      guildHistories,
-      historyLimit: 10,
+      conversationHistory: {
+        conversationRef: "conv_room",
+        throughSequence: 3,
+        requestSourceIds: ["m1"],
+      },
       channelConfig: { allowed: true, users: ["111"] },
     });
 
@@ -220,37 +189,12 @@ describe("discord buildDiscordMessageProcessContext sender bot status", () => {
       throw new Error("expected a built Discord message context");
     }
 
-    expect(result.ctxPayload.Body).toContain("allowed body");
-    expect(result.ctxPayload.Body).not.toContain("blocked body");
-    expect(result.ctxPayload.InboundHistory).toEqual([
-      expect.objectContaining({ messageId: "allowed", body: "allowed body" }),
-    ]);
-  });
-
-  it("keeps all pending and inbound history under the default visibility mode", async () => {
-    const guildHistories = new Map<string, DiscordHistoryEntry[]>([
-      [
-        "c1",
-        [
-          historyEntry({ id: "allowed", senderId: "111", sender: "Alice", body: "allowed body" }),
-          historyEntry({ id: "other", senderId: "222", sender: "Mallory", body: "other body" }),
-        ],
-      ],
-    ]);
-    const ctx = await createBaseDiscordMessageContext({
-      guildHistories,
-      historyLimit: 10,
-      channelConfig: { allowed: true, users: ["111"] },
-    });
-
-    const result = await buildDiscordMessageProcessContext({ ctx, text: "current", mediaList: [] });
-    if (!result) {
-      throw new Error("expected a built Discord message context");
-    }
-
-    expect(result.ctxPayload.Body).toContain("allowed body");
-    expect(result.ctxPayload.Body).toContain("other body");
-    expect(result.ctxPayload.InboundHistory).toHaveLength(2);
+    expect(
+      result.ctxPayload.ConversationHistory?.includeMessage?.({
+        text: "other body",
+        sender: { id: "222" },
+      }),
+    ).toBe(true);
   });
 
   it("records an unavailable-attachment notice for path-less media facts", async () => {
@@ -343,24 +287,5 @@ describe("discord buildDiscordMessageProcessContext sender bot status", () => {
       mediaList: [{ path: "/tmp/ok.png", contentType: "image/png", kind: "image" }],
     });
     expect(allResolved?.ctxPayload.Body).not.toContain("unavailable");
-  });
-
-  it("does not inject stale pending history when history is disabled", async () => {
-    const guildHistories = new Map<string, DiscordHistoryEntry[]>([
-      ["c1", [historyEntry({ id: "stale", senderId: "111", sender: "Alice", body: "stale body" })]],
-    ]);
-    const ctx = await createBaseDiscordMessageContext({
-      guildHistories,
-      historyLimit: 0,
-    });
-
-    const result = await buildDiscordMessageProcessContext({ ctx, text: "current", mediaList: [] });
-    if (!result) {
-      throw new Error("expected a built Discord message context");
-    }
-
-    expect(result.ctxPayload.Body).toContain("current");
-    expect(result.ctxPayload.Body).not.toContain("stale body");
-    expect(result.ctxPayload.InboundHistory).toBeUndefined();
   });
 });

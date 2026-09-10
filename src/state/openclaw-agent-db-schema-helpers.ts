@@ -24,6 +24,7 @@ import {
   ensureOpenClawAgentBoardSchemaInTransaction,
 } from "./openclaw-agent-board-schema.js";
 import { CONTEXT_ENGINE_TURN_OUTBOX_TABLE } from "./openclaw-agent-context-engine-turn-outbox-schema.js";
+import { CONVERSATION_HISTORY_TABLE } from "./openclaw-agent-conversation-history-schema.js";
 import { FIRST_USE_ADDITIVE_AGENT_COLUMN_DEFINITIONS } from "./openclaw-agent-db-additive-columns.js";
 import {
   AGENT_MEDIA_SCHEMA_VERSION,
@@ -79,6 +80,7 @@ const AGENT_SCHEMA_COMPATIBILITY = {
     MEMORY_INDEX_CHUNK_PROVENANCE_TABLE,
     MEMORY_INDEX_CHUNK_RECALL_METADATA_TABLE,
     CONTEXT_ENGINE_TURN_OUTBOX_TABLE,
+    CONVERSATION_HISTORY_TABLE,
     MESSAGE_TOOL_RUN_OUTCOMES_TABLE,
     SESSION_GOAL_OPERATIONS_TABLE,
     SESSION_PENDING_INPUTS_TABLE,

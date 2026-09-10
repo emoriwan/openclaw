@@ -24,6 +24,7 @@ import {
   TelegramPairingStoreReadError,
 } from "./bot/helpers.js";
 import type { TelegramContext, TelegramGetChat } from "./bot/types.js";
+import { recordTelegramConversationMessages } from "./conversation-observation.js";
 import { emitTelegramLiveLocationMessageHook } from "./location-message-hook.js";
 import type { TelegramMessageDispatchReplayClaim } from "./message-dispatch-dedupe.js";
 
@@ -43,7 +44,6 @@ type TelegramMessageHandlerRuntime = Pick<
   | "claimMessageDispatchDedupe"
   | "buildSyntheticContext"
   | "resolveTelegramSessionState"
-  | "resolvePromptContextAmbientWatermark"
 > & {
   recordMessageForReplyChain: (
     ...args: Parameters<TelegramMessagePipeline["recordMessageForReplyChain"]>
@@ -70,7 +70,6 @@ function createTelegramInboundHandlers(
     claimMessageDispatchDedupe,
     buildSyntheticContext,
     resolveTelegramSessionState,
-    resolvePromptContextAmbientWatermark,
     recordMessageForReplyChain,
   } = messageRuntime;
   const { authorizeInboundMessage } = authorizationRuntime;
@@ -159,6 +158,24 @@ function createTelegramInboundHandlers(
       return;
     }
     await recordMessageForReplyChain(normalizedMsg, gate.context.threadSpec, params.botUserId);
+    if (isGroup) {
+      const session = resolveTelegramSessionState({
+        chatId: normalizedMsg.chat.id,
+        isGroup,
+        threadSpec: gate.context.threadSpec,
+        senderId: normalizedMsg.from?.id,
+        runtimeCfg: gate.context.cfg,
+      });
+      await recordTelegramConversationMessages({
+        agentId: session.agentId,
+        storePath: session.storePath,
+        accountId,
+        chatId: normalizedMsg.chat.id,
+        threadSpec: gate.context.threadSpec,
+        messages: [normalizedMsg],
+        updateIds: [params.providerUpdate?.id],
+      });
+    }
     if (params.providerUpdate) {
       emitTelegramLiveLocationMessageHook({
         accountId,
@@ -194,7 +211,6 @@ function createTelegramInboundHandlers(
       const { effectiveDmAllow } = gate;
       const {
         dmPolicy,
-        resolvedThreadId,
         storeAllowFrom,
         groupConfig,
         topicConfig,
@@ -213,27 +229,33 @@ function createTelegramInboundHandlers(
       const promptContextMinTimestampMs = normalizePromptContextMinTimestampMs(
         sessionState.sessionEntry?.sessionStartedAt,
       );
-      const promptContextAmbientWatermark = resolvePromptContextAmbientWatermark({
-        chatId: event.chatId,
-        isGroup: event.isGroup,
-        resolvedThreadId,
-        sessionKey: sessionState.sessionKey,
-        storePath: sessionState.storePath,
-      });
 
       const dispatchDedupe = await claimMessageDispatchDedupe(event.msg, event.botUserId);
       if (!dispatchDedupe.process) {
         return { kind: "ignored" };
       }
       dispatchDedupeClaims = dispatchDedupe.claims;
+      // Preserve native room order before sender-specific debounce or media work
+      // can release this transport lane and let a later request capture context.
+      const conversationHistory = event.isGroup
+        ? await recordTelegramConversationMessages({
+            agentId: sessionState.agentId,
+            storePath: sessionState.storePath,
+            accountId,
+            chatId: event.chatId,
+            threadSpec,
+            messages: [event.msg],
+            updateIds: [event.ctx.update?.update_id],
+          })
+        : undefined;
       await recordMessageForReplyChain(event.msg, gate.context.threadSpec, event.botUserId);
       return await processInboundMessage({
         authorizationCfg: gate.context.cfg,
+        conversationHistory,
         ctx: event.ctx,
         msg: event.msg,
         chatId: event.chatId,
         isGroup: event.isGroup,
-        isForum: event.isForum,
         threadSpec,
         dmPolicy,
         storeAllowFrom,
@@ -246,7 +268,7 @@ function createTelegramInboundHandlers(
         sendOversizeWarning: event.sendOversizeWarning,
         oversizeLogMessage: event.oversizeLogMessage,
         dispatchDedupeClaims,
-        ...promptContextBoundaryOptions(promptContextMinTimestampMs, promptContextAmbientWatermark),
+        ...promptContextBoundaryOptions(promptContextMinTimestampMs),
       });
     } catch (err) {
       releaseDispatchDedupeClaims(dispatchDedupeClaims, err);

@@ -12,7 +12,11 @@ import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { initializeGlobalHookRunner } from "openclaw/plugin-sdk/hook-runtime";
 import { MESSAGE_TOOL_DELIVERY_HINTS } from "openclaw/plugin-sdk/message-tool-delivery-hints";
-import { createMockPluginRegistry } from "openclaw/plugin-sdk/plugin-test-runtime";
+import {
+  createMockPluginRegistry,
+  loadUserTurnTranscriptRecorderFactoryForTest,
+} from "openclaw/plugin-sdk/plugin-test-runtime";
+import { recordConversationObservation } from "openclaw/plugin-sdk/reply-history";
 import { registerSandboxBackend } from "openclaw/plugin-sdk/sandbox";
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
 import { readSessionTranscriptEvents } from "openclaw/plugin-sdk/session-transcript-runtime";
@@ -432,6 +436,79 @@ describe("runCodexAppServerAttempt context-engine lifecycle", () => {
     );
     await harness.completeTurn();
     await run;
+  });
+
+  it("rejects an oversized adopted request before native submission and preserves its transcript", async () => {
+    const workspaceDir = path.join(tempDir, "workspace-input-limit");
+    const params = await createSqliteParams(workspaceDir, "input-limit");
+    const sessionKey = params.sessionTarget?.sessionKey;
+    if (!sessionKey) {
+      throw new Error("Expected the fixture's bound session key");
+    }
+    const target = { ...params.sessionTarget, sessionId: params.sessionId, sessionKey };
+    const createRecorder = await loadUserTurnTranscriptRecorderFactoryForTest();
+    const prompt = `first unread message\n${"x".repeat(CODEX_TURN_START_TEXT_INPUT_MAX_CHARS)}\ncurrent request`;
+    const capture = await recordConversationObservation(
+      { agentId: "main", storePath: target.storePath },
+      { conversationRef: "input-limit", sourceId: "oversized", message: { text: prompt } },
+    );
+    const recorder = createRecorder({
+      input: { text: prompt, idempotencyKey: "oversized" },
+      target: {
+        ...target,
+        agentId: "main",
+        sessionId: "session-1",
+        sessionKey: "agent:main:session-1",
+        sessionEntry: undefined,
+        cwd: workspaceDir,
+      },
+    });
+    await recorder.stageApproved!({
+      runId: params.runId,
+      conversationHistory: capture,
+      assertCurrent: () => {},
+    });
+    // The host adopts plugin-harness input before invoking the native attempt.
+    await recorder.persistApproved();
+    const markSent = vi.spyOn(recorder, "markSentToProvider");
+    const beginSubmission = vi.spyOn(recorder, "beginSubmission");
+    params.prompt = prompt;
+    params.userTurnTranscriptRecorder = recorder;
+    const harness = createStartedThreadHarness();
+    let settled = false;
+    const result = runCodexAppServerAttempt(params).then(
+      (value) => {
+        settled = true;
+        return { value };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { error };
+      },
+    );
+    await vi.waitFor(() => {
+      expect(settled || harness.requests.some((request) => request.method === "turn/start")).toBe(
+        true,
+      );
+    });
+    if (!settled) {
+      await harness.completeTurn();
+    }
+    await expect(result).resolves.toMatchObject({
+      error: {
+        name: "AgentHarnessPreflightError",
+        userMessage: expect.stringContaining(
+          "Nothing was sent. Use /new to start fresh without unread conversation; in a group, send it as a reply to this message.",
+        ),
+      },
+    });
+    expect(harness.requests.some((request) => request.method === "turn/start")).toBe(false);
+    expect(markSent).not.toHaveBeenCalled();
+    expect(beginSubmission).not.toHaveBeenCalled();
+    expect(JSON.stringify(await readSessionTranscriptEvents(target))).toContain(
+      "first unread message",
+    );
+    recorder.finishPendingInput?.("cancelled");
   });
 
   it("keeps context-engine history bound to the run session when sandbox key differs", async () => {

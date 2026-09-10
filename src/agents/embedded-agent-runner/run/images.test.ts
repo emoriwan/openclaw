@@ -372,15 +372,15 @@ describe("detectAndLoadPromptImages", () => {
     }
   });
 
-  it("uses a described fact identity to suppress its generated media-note path", async () => {
-    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-described-dedupe-"));
-    const imagePath = path.join(workspaceDir, "photo.png");
-    await fs.writeFile(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
+  it.each(["media-note", "file-reference", "runtime-projection"])(
+    "does not reinject a suppressed image through its %s path",
+    async (kind) => {
+      const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-described-dedupe-"));
+      const imagePath = path.join(workspaceDir, "photo.png");
+      await fs.writeFile(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-    try {
-      const result = await detectAndLoadPromptImages({
-        prompt: `[media attached: ${imagePath} (image/png)]`,
-        media: buildInboundMediaNoteProjection({
+      try {
+        const media = buildInboundMediaNoteProjection({
           media: [{ path: imagePath, contentType: "image/png" }],
           MediaUnderstanding: [
             {
@@ -390,18 +390,34 @@ describe("detectAndLoadPromptImages", () => {
               provider: "test",
             },
           ],
-        }).media,
-        workspaceDir,
-        model: { input: ["text", "image"] },
-      });
+        }).media;
+        const message = buildPersistedUserTurnMessage({
+          text: "Earlier image",
+          media: media.map((fact) => ({ ...fact, path: "/original/photo.png" })),
+        })!;
+        attachRuntimePromptMediaFacts(message, media);
+        const result = await detectAndLoadPromptImages({
+          prompt:
+            kind === "media-note"
+              ? `[media attached: ${imagePath} (image/png)]`
+              : `Earlier image: ${imagePath}`,
+          ...(kind === "runtime-projection"
+            ? { userTurnTranscriptRecorder: { resolveMessage: async () => message } }
+            : { media }),
+          workspaceDir,
+          model: { input: ["text", "image"] },
+        });
 
-      expect(result.detectedRefs).toEqual([{ raw: imagePath, type: "path", resolved: imagePath }]);
-      expect(result.loadedCount).toBe(0);
-      expect(result.images).toEqual([]);
-    } finally {
-      await fs.rm(workspaceDir, { recursive: true, force: true });
-    }
-  });
+        expect(result.detectedRefs).toEqual([
+          { raw: imagePath, type: "path", resolved: imagePath },
+        ]);
+        expect(result.loadedCount).toBe(0);
+        expect(result.images).toEqual([]);
+      } finally {
+        await fs.rm(workspaceDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("dedupes a relative fact projection against the fact workspace", async () => {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-fact-workspace-dedupe-"));

@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import { createRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
 import {
   clearRuntimeConfigSnapshot,
   createRuntimeConfigReader,
@@ -32,6 +33,39 @@ beforeEach(() => {
 afterEach(() => clearRuntimeConfigSnapshot());
 
 describe("Discord live account policy", () => {
+  it("warns about retired group controls once at startup and once for a new config snapshot", async () => {
+    const cfg: OpenClawConfig = {
+      channels: {
+        discord: {
+          token: "synthetic-token",
+          guilds: { "111": { requireMention: false } },
+          historyLimit: 3,
+        },
+      },
+      messages: { groupChat: { unmentionedInbound: "room_event", mentionPatterns: ["openclaw"] } },
+    };
+    publish(cfg);
+    const log = vi.fn();
+    const read = createDiscordLivePolicyReader({
+      cfg,
+      accountId: "default",
+      runtime: { ...createRuntimeEnv(), log },
+    });
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log.mock.calls[0]?.[0]).toContain("native bot mention or reply");
+    expect(log.mock.calls[0]?.[0]).toContain("historyLimit");
+    expect(log.mock.calls[0]?.[0]).toContain("unmentionedInbound");
+    expect(log.mock.calls[0]?.[0]).toContain("mentionPatterns");
+    await read();
+    await read();
+    expect(log).toHaveBeenCalledTimes(1);
+
+    publish({ ...cfg, messages: { groupChat: { unmentionedInbound: "user_request" } } });
+    await read();
+    await read();
+    expect(log).toHaveBeenCalledTimes(2);
+  });
+
   it("keeps the admitted runtime owner across startup and allowlist resolution", async () => {
     const cfg = config(["startup-name"]);
     publish(cfg);

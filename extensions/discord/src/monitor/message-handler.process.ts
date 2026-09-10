@@ -184,7 +184,6 @@ async function processDiscordMessageInner(
     processContext: { ...processContext, replyReference },
     sourceRepliesAreToolOnly,
     shouldDisableCoreTypingKeepalive,
-    isRoomEvent,
     dispatchStartedAt,
     feedbackRest: reactions.feedbackRest,
     deliveryRest: reactions.deliveryRest,
@@ -195,8 +194,6 @@ async function processDiscordMessageInner(
     tableMode,
     maxLinesPerMessage,
     chunkMode,
-    beginQueuedDeliveryCorrelation,
-    endDeliveryCorrelation,
     resolveCurrentTurnTranscriptFinalText,
     deliverChannelId: initialDeliverChannelId,
     draftPreview,
@@ -625,25 +622,12 @@ async function processDiscordMessageInner(
         onError: onDiscordDeliveryError,
       },
       record: turn.record,
-      history: isRoomEvent
-        ? undefined
-        : {
-            isGroup: isGuildMessage,
-            historyKey: messageChannelId,
-            historyMap: ctx.guildHistories,
-            limit: ctx.historyLimit,
-          },
       replyOptions: {
         ...(turnAdoptionLifecycle ? bindIngressLifecycleToReplyOptions(turnAdoptionLifecycle) : {}),
         abortSignal,
         skillFilter: ctx.channelConfig?.skills,
         sourceReplyDeliveryMode,
         typingKeepalive: shouldDisableCoreTypingKeepalive ? false : undefined,
-        // The primary turn already owns one correlation; each queued followup
-        // needs a fresh owner so its eventual delivery clears room history.
-        queuedDeliveryCorrelations: isRoomEvent
-          ? [{ begin: beginQueuedDeliveryCorrelation }]
-          : undefined,
         suppressTyping: isRoomEvent ? true : undefined,
         allowProgressCallbacksWhenSourceDeliverySuppressed:
           sourceRepliesAreToolOnly && draftPreview.draftStream && draftPreview.isProgressMode
@@ -712,7 +696,6 @@ async function processDiscordMessageInner(
     throw err;
   } finally {
     activeThreadRoute.end();
-    endDeliveryCorrelation();
     await draftPreview.cleanup({ finalDeliveryFailed: userFacingFinalDeliveryFailed });
     dispatchError ||= readAgentRunTerminalOutcome(dispatchResult) === "failed";
     const finalReceipt = dispatchResult?.settledReceipt?.counts.final;

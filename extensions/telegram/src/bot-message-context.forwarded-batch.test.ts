@@ -102,12 +102,21 @@ describe("buildTelegramMessageContext forwarded debounce batches", () => {
   it("redacts a debounced forward origin denied by group context visibility", async () => {
     const chat = { id: -1007, type: "group" as const, title: "Ops" };
     const sender = { id: 1, first_name: "Allowed", is_bot: false };
+    const replyTarget = {
+      message_id: 100,
+      date: 1_699_999_999,
+      chat,
+      from: { id: 7, username: "bot", first_name: "Bot", is_bot: true },
+      text: "Please send the notes.",
+      reply_to_message: undefined,
+    };
     const context = await buildTelegramMessageContextForTest({
       message: {
         message_id: 2,
         chat,
         from: sender,
         text: "ordinary note\nprivate forwarded note",
+        reply_to_message: replyTarget,
       },
       cfg: {
         channels: {
@@ -136,6 +145,7 @@ describe("buildTelegramMessageContext forwarded debounce batches", () => {
             chat,
             from: sender,
             text: "private forwarded note",
+            reply_to_message: replyTarget,
             forward_origin: {
               type: "user",
               sender_user: {

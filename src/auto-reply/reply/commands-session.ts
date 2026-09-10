@@ -174,8 +174,16 @@ export const handleActivationCommand: CommandHandler = async (params, allowTextC
   if (nonOwnerResult) {
     return nonOwnerResult;
   }
+  const supportedModes = getChannelPlugin(params.command.channel)?.commands?.groupActivationModes;
   if (!activationCommand.mode) {
-    return sessionCommandReply("⚙️ Usage: /activation mention|always");
+    return sessionCommandReply(
+      `⚙️ Usage: /activation ${supportedModes?.join("|") ?? "mention|always"}`,
+    );
+  }
+  if (supportedModes && !supportedModes.includes(activationCommand.mode)) {
+    return sessionCommandReply(
+      `⚙️ This channel supports group activation: ${supportedModes.join(", ")}. Mention the bot with a native tag or reply to its message.`,
+    );
   }
   if (params.sessionEntry && params.sessionStore && params.sessionKey) {
     params.sessionEntry.groupActivation = activationCommand.mode;

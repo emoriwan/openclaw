@@ -3,7 +3,7 @@ summary: "DM policy, group allowlists, mention gating, and per-chat tool policy"
 read_when:
   - Deciding who may DM the Telegram bot
   - Allowing a group or forum topic and its senders
-  - Turning mention gating on or off for a group
+  - Keeping group context while replying only when addressed
 title: "Telegram access control"
 sidebarTitle: "Access control"
 ---
@@ -119,7 +119,6 @@ curl "https://api.telegram.org/bot<bot_token>/getUpdates"
       groups: {
         "-1001234567890": {
           groupPolicy: "open",
-          requireMention: false,
         },
       },
     },
@@ -156,26 +155,16 @@ curl "https://api.telegram.org/bot<bot_token>/getUpdates"
   </Tab>
 
   <Tab title="Mention behavior">
-    Group replies require mention by default. A mention can come from:
+    Group input requires either:
 
     - a native `@botusername` mention, or
-    - a mention pattern in `agents.entries.*.groupChat.mentionPatterns` or `messages.groupChat.mentionPatterns`
+    - a native reply to a message from this bot.
 
-    Session-level toggles (state only, not persisted): `/activation always`, `/activation mention`. Use config for persistence:
+    Permitted group text is recorded while the bot stays quiet. The next addressed request receives unread text through that request, including after a Gateway restart. Later messages wait for another addressed request. `/new` clears unread history through the reset request; later messages remain unread. Queue and steering settings still control when an addressed request runs.
 
-```json5
-{
-  channels: {
-    telegram: {
-      groups: {
-        "*": { requireMention: false },
-      },
-    },
-  },
-}
-```
+    Room access and context-visibility rules still apply. Sender allowlists control who may invoke the bot. Background attachments are saved with references for later inspection; receipt does not start model work. Files use the existing attachment lifetime, including configured `attachments.ttlHours`. If a file expires, inspection returns an explicit unavailable result. See [Telegram messaging](/channels/telegram/messaging) for attachment handling.
 
-    Group history context is always on and bounded by `historyLimit`. Set `channels.telegram.historyLimit: 0` to disable the group history window. `openclaw doctor --fix` removes the retired `includeGroupHistoryContext` key.
+    Existing `requireMention`, `mentionPatterns`, `unmentionedInbound`, and group `historyLimit` settings remain accepted for upgrades, but do not enable ambient turns or limit unread group text. Telegram warns about configured legacy settings at startup. `/activation always` no longer permits unaddressed group input. No Doctor cleanup is required to start with these settings.
 
     Getting the group chat ID: forward a group message to `@userinfobot` / `@getidsbot`, read `chat.id` from `openclaw logs --follow`, inspect Bot API `getUpdates`, or (once the group is allowed) run `/whoami@<bot_username>`.
 

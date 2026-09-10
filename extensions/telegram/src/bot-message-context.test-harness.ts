@@ -59,16 +59,8 @@ function createTelegramMessageContextSessionRuntimeForTest(
 ): TelegramTestSessionRuntime {
   return {
     buildChannelInboundEventContext,
-    readAmbientTranscriptWatermark: () => undefined,
     readSessionUpdatedAt: () => undefined,
     recordInboundSession: async () => undefined,
-    resolveAmbientTranscriptWatermarkKey: ({ channel, accountId, conversationId, threadId }) =>
-      JSON.stringify([
-        channel,
-        accountId ?? "",
-        conversationId,
-        threadId === undefined ? "" : String(threadId),
-      ]),
     resolveInboundLastRouteSessionKey: ({ route, sessionKey }) =>
       route.lastRoutePolicy === "main" ? route.mainSessionKey : sessionKey,
     resolvePinnedMainDmOwnerFromAllowlist: () => null,
@@ -148,9 +140,7 @@ export async function buildTelegramMessageContextForTest(
     },
     sessionRuntime,
     account: { accountId: params.accountId ?? "default" } as never,
-    historyLimit: params.historyLimit ?? 0,
     dmHistoryLimit: params.dmHistoryLimit ?? 10,
-    groupHistories: params.groupHistories ?? new Map(),
     dmPolicy: params.dmPolicy ?? "open",
     allowFrom: ["*"],
     groupAllowFrom: [],
@@ -164,7 +154,11 @@ export async function buildTelegramMessageContextForTest(
         groupConfig: { requireMention: false },
         topicConfig: undefined,
       })),
-    sendChatActionHandler: params.sendChatActionHandler ?? ({ sendChatAction: vi.fn() } as never),
+    sendChatActionHandler: params.sendChatActionHandler ?? {
+      sendChatAction: vi.fn(async () => {}),
+      isSuspended: () => false,
+      reset: () => {},
+    },
   });
 }
 
