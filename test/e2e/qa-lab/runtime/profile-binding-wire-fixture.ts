@@ -82,7 +82,7 @@ export async function runProfileWireProof<P extends ProfileWireProvider>(
         primaryModel: MODEL_REF,
         alternateModel: MODEL_REF,
         controlUiEnabled: false,
-        enabledPluginIds: ["openai"],
+        enabledPluginIds: ["openai", "canvas"],
       });
       await instance.state.writeConfig({
         ...config,
@@ -103,6 +103,7 @@ export async function runProfileWireProof<P extends ProfileWireProvider>(
         },
         tools: { ...config.tools, codeMode: false, exec: { mode: "full" } },
       });
+      instance.env.OPENCLAW_SKIP_CANVAS_HOST = "0";
       await instance.startGateway();
       const connect = async (options?: Parameters<typeof SkillLibraryWireClient.connect>[1]) => {
         const connected = await SkillLibraryWireClient.connect(instance, options);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer } from "node:http";
 import path from "node:path";
@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import {
   startQaMockOpenAiServer,
+  TINY_PNG_BASE64,
   type MockOpenAiRequestSnapshot,
 } from "../extensions/qa-lab/api.js";
 import {
@@ -38,6 +39,19 @@ const CASES = {
 } as const;
 type CaseID = keyof typeof CASES;
 type WireCase = { sessionKey: string; marker: string; message: string };
+const MEDIA_CASES = {
+  aclAllowed: { session: "acl", allowed: true },
+  acl: { session: "acl", allowed: false },
+  controlACL: { session: "controlACL", allowed: true },
+  profileAllowed: { session: "profile", allowed: true },
+  profile: { session: "profile", allowed: false },
+  controlProfile: { session: "controlProfile", allowed: true },
+  retiredResult: { session: "controlACL", allowed: false },
+  retiredControl: { session: "controlACL", allowed: true },
+} as const;
+type MediaCaseID = keyof typeof MEDIA_CASES;
+type MediaSession = (typeof MEDIA_CASES)[MediaCaseID]["session"];
+type WireMedia = { sessionKey: string; artifactID: string };
 const CONTROL_ACTIONS = [
   "pair",
   "revoke-acl",
@@ -47,6 +61,8 @@ const CONTROL_ACTIONS = [
   "hold-response",
   "wait-held",
   "release-response",
+  "media-start",
+  "media-complete",
 ] as const;
 type ControlProgress = {
   action: (typeof CONTROL_ACTIONS)[number] | "unknown";
@@ -68,6 +84,11 @@ export type NativeActionFixtureDescriptor = {
   aliceProfileID: string;
   bobProfileID: string;
   cases: Record<CaseID, WireCase>;
+  media: {
+    pngBase64: string;
+    sha256: string;
+    sessions: Record<MediaSession, WireMedia>;
+  };
 };
 
 async function readBody(request: AsyncIterable<Buffer | string>) {
@@ -87,16 +108,20 @@ export async function withNativeActionGateway(
   executeNative: (descriptor: NativeActionFixtureDescriptor) => Promise<void>,
 ) {
   let completedCases: CaseID[] = [];
+  let completedMedia: MediaCaseID[] = [];
   await runProfileWireProof(
     () => startQaMockOpenAiServer({ modelRefs: [MODEL_REF] }),
     async (fixture) => {
       const { instance, provider, admin, alice, bob, aliceId, bobId } = fixture;
       const controlToken = randomUUID();
+      const mediaPaths = new Set<string>();
       const proxy = await startQaGatewayRpcProxy({
         backendPort: instance.port,
         repoRoot: process.cwd(),
         token: controlToken,
         recordPath: undefined,
+        observedMethods: ["artifacts.download"],
+        mediaPaths,
         upstreamHeaders: {
           "x-forwarded-user": SKILL_LIBRARY_ALICE,
           "x-forwarded-for": "198.51.100.40",
@@ -107,6 +132,14 @@ export async function withNativeActionGateway(
       });
       const verified = new Map<CaseID, string | undefined>();
       const completed = new Set<CaseID>();
+      const mediaCompleted = new Set<MediaCaseID>();
+      let mediaAttempt: { id: MediaCaseID; before: ReturnType<typeof proxy.snapshot> } | undefined;
+      const png = Buffer.from(TINY_PNG_BASE64, "base64");
+      const media = {
+        pngBase64: TINY_PNG_BASE64,
+        sha256: createHash("sha256").update(png).digest("hex"),
+        sessions: {} as Record<MediaSession, WireMedia>,
+      };
       const pairedDevices = new Set<string>();
       const pending = new Set<Promise<void>>();
       let firstControlFailure: Error | undefined;
@@ -201,6 +234,60 @@ export async function withNativeActionGateway(
           return await proxyControl(input);
         }
         switch (input.action) {
+          case "media-start": {
+            assert(typeof input.case === "string" && Object.hasOwn(MEDIA_CASES, input.case));
+            const id = input.case as MediaCaseID;
+            assert(!mediaAttempt && !mediaCompleted.has(id), "overlapping or repeated media case");
+            mediaAttempt = { id, before: proxy.snapshot() };
+            return { started: id };
+          }
+          case "media-complete": {
+            assert(mediaAttempt && mediaAttempt.id === input.case, "media case was not started");
+            const { id, before } = mediaAttempt;
+            const allowed = MEDIA_CASES[id].allowed;
+            const after = proxy.snapshot();
+            const expected = allowed || id === "retiredResult" ? 1 : 0;
+            for (const counter of ["requests", "matched", "completed", "succeeded"] as const) {
+              assert.equal(
+                after.media[counter] - before.media[counter],
+                expected,
+                `${id}: media ${counter}`,
+              );
+            }
+            const responses = after.events
+              .slice(before.events.length)
+              .filter(
+                (event: { kind: string; method?: string }) =>
+                  event.kind === "rpc-response" && event.method === "artifacts.download",
+              );
+            assert.equal(responses.length, 1, `${id}: fresh artifact authorization response`);
+            assert.equal(responses[0].ok, expected === 1, `${id}: artifact authorization`);
+            if (id === "retiredResult") {
+              const held = after.events
+                .slice(before.events.length)
+                .find(
+                  (event: { kind: string; method?: string }) =>
+                    event.kind === "response-held" && event.method === "media.get",
+                );
+              assert(held?.ok && held.sha256 === media.sha256 && held.sizeBytes === png.length);
+              assert(
+                after.events
+                  .slice(before.events.length)
+                  .some(
+                    (event: { kind: string; method?: string; delivered?: boolean }) =>
+                      event.kind === "response-released" &&
+                      event.method === "media.get" &&
+                      event.delivered,
+                  ),
+                "held PNG was not released to the retired loader",
+              );
+            }
+            assert.equal(input.outcome, allowed ? "allowed" : "rejected");
+            assert.equal(input.sha256, allowed ? media.sha256 : undefined);
+            mediaCompleted.add(id);
+            mediaAttempt = undefined;
+            return { completed: id };
+          }
           case "pair": {
             progress.phase = "connect-record";
             const connection = proxy
@@ -312,7 +399,7 @@ export async function withNativeActionGateway(
             }
             const marker = `NATIVE-${platform.toUpperCase()}-${id.toUpperCase()}`;
             const sentinel = path.join(instance.state.workspaceDir, `${marker}.txt`);
-            const command = `printf '%s' ${JSON.stringify(marker)} >> ${JSON.stringify(sentinel)}`;
+            const command = `printf '%s' ${JSON.stringify(marker)} >> ${JSON.stringify(`./${marker}.txt`)}`;
             await fs.writeFile(sentinel, "");
             commands.set(id, { sentinel, command });
             cases[id] = {
@@ -324,6 +411,43 @@ export async function withNativeActionGateway(
                 `Reply exactly \`${marker}\`.`,
               ].join(" "),
             };
+          }
+          // Bob's ordinary send ingests the PNG into managed media. Native clients
+          // receive only the artifact id and must obtain their own authorized download.
+          await fs.writeFile(path.join(instance.state.workspaceDir, "native-wire.png"), png);
+          for (const session of new Set(Object.values(MEDIA_CASES).map((spec) => spec.session))) {
+            const sessionKey = cases[session].sessionKey;
+            const started = await bob.request<{ runId: string }>("chat.send", {
+              sessionKey,
+              message: "Reply exactly `MEDIA:./native-wire.png`",
+              deliver: false,
+              idempotencyKey: randomUUID(),
+            });
+            const terminal = await admin.request<{ status: string }>(
+              "agent.wait",
+              { runId: started.runId, timeoutMs: PROOF_TIMEOUT_MS },
+              PROOF_TIMEOUT_MS + 5000,
+            );
+            assert.equal(terminal.status, "ok", "media ingestion run failed");
+            const artifacts = await waitFor("managed native PNG", async () => {
+              const result = await bob.request<{
+                artifacts: Array<{ id: string; mimeType?: string; download: { mode: string } }>;
+              }>("artifacts.list", { sessionKey, agentId: "qa" });
+              return result.artifacts.length > 0 ? result.artifacts : undefined;
+            });
+            assert.equal(artifacts.length, 1);
+            const artifact = artifacts[0]!;
+            assert.match(artifact.id, /^artifact_managed_image_/);
+            assert.equal(artifact.mimeType, "image/png");
+            assert.equal(artifact.download.mode, "url");
+            const download = await bob.request<{ url: string }>("artifacts.download", {
+              sessionKey,
+              agentId: "qa",
+              artifactId: artifact.id,
+            });
+            assert(download.url.startsWith("/api/chat/media/outgoing/"));
+            mediaPaths.add(new URL(download.url, "http://127.0.0.1").pathname);
+            media.sessions[session] = { sessionKey, artifactID: artifact.id };
           }
           await new Promise<void>((resolve, reject) => {
             control.once("error", reject);
@@ -340,12 +464,17 @@ export async function withNativeActionGateway(
             aliceProfileID: aliceId,
             bobProfileID: bobId,
             cases,
+            media,
           });
           assert.deepEqual(
             [...completed].toSorted(),
             [...caseKeys].toSorted(),
             "missing native wire cases",
           );
+          if (platform === "ios") {
+            assert.deepEqual([...mediaCompleted].toSorted(), Object.keys(MEDIA_CASES).toSorted());
+            assert(!mediaAttempt, "unfinished native media case");
+          }
           assert(pairedDevices.size > 0, "no real native device pairing was approved");
           for (const request of proxy
             .snapshot()
@@ -390,9 +519,17 @@ export async function withNativeActionGateway(
         },
       );
       completedCases = [...completed];
+      completedMedia = [...mediaCompleted];
     },
   );
-  console.log(JSON.stringify({ platform, cases: completedCases, finalEffectsVerified: true }));
+  console.log(
+    JSON.stringify({
+      platform,
+      cases: completedCases,
+      mediaCases: completedMedia,
+      finalEffectsVerified: true,
+    }),
+  );
 }
 
 async function runNative(platform: "ios" | "macos", fixture: NativeActionFixtureDescriptor) {

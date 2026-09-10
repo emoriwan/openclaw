@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { createServer, request } from "node:http";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { finished } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
 
 export async function startQaGatewayRpcProxy({
@@ -11,9 +13,13 @@ export async function startQaGatewayRpcProxy({
   token,
   port = 0,
   upstreamHeaders,
+  observedMethods = [],
+  mediaPaths = new Set(),
 }) {
   const { WebSocket, WebSocketServer } = createRequire(path.join(repoRoot, "package.json"))("ws");
   const peers = new Set();
+  const httpRequests = new Set();
+  const media = { requests: 0, matched: 0, completed: 0, succeeded: 0 };
   let events = [];
   let sequence = 0;
   let connection = 0;
@@ -23,8 +29,10 @@ export async function startQaGatewayRpcProxy({
   let holdMethod;
   let heldResponse;
   let heldWaiter;
+  let mediaTask;
   const snapshot = () => ({
-    events,
+    events: [...events],
+    media: { ...media },
     held: Boolean(held),
     heldResponse: heldResponse?.summary,
     pid: process.pid,
@@ -66,7 +74,11 @@ export async function startQaGatewayRpcProxy({
             writeFileSync(recordPath, "");
           }
         } else if (action === "hold-response") {
-          if (!["users.self", "chat.send"].includes(input.method) || holdMethod || heldResponse) {
+          if (
+            !["users.self", "chat.send", "media.get"].includes(input.method) ||
+            holdMethod ||
+            heldResponse
+          ) {
             throw new Error("invalid or overlapping response hold");
           }
           holdMethod = input.method;
@@ -97,10 +109,7 @@ export async function startQaGatewayRpcProxy({
           }
           const releasing = heldResponse;
           heldResponse = undefined;
-          const delivered = releasing.front.readyState === WebSocket.OPEN;
-          if (delivered) {
-            releasing.front.send(releasing.raw);
-          }
+          const delivered = await releasing.release();
           record("response-released", { ...releasing.summary, delivered });
         } else if (action === "drop-response") {
           dropResponse = true;
@@ -128,13 +137,77 @@ export async function startQaGatewayRpcProxy({
       })().catch(() => res.writeHead(500).end("fixture control failed"));
       return;
     }
+    // Inspect only the pathname. Ticket queries and HTTP headers never enter evidence.
+    const pathname = new URL(req.url, "http://127.0.0.1").pathname;
+    const observedMedia = req.method === "GET" && mediaPaths.has(pathname);
+    if (mediaPaths.size > 0 && req.method === "GET" && ++media.requests > 32) {
+      res.writeHead(429).end();
+      return;
+    }
+    if (observedMedia) {
+      media.matched += 1;
+    }
     const upstream = request(
       { hostname: "127.0.0.1", port: Number(backendPort), path: req.url, method: req.method },
       (response) => {
+        if (observedMedia) {
+          response.once("end", () => {
+            media.completed += 1;
+            if (response.statusCode === 200) {
+              media.succeeded += 1;
+            }
+          });
+        }
+        if (observedMedia && holdMethod === "media.get") {
+          mediaTask = (async () => {
+            const chunks = [];
+            let sizeBytes = 0;
+            for await (const chunk of response) {
+              sizeBytes += chunk.length;
+              if (sizeBytes > 1024 * 1024) {
+                throw new Error("held media response exceeded limit");
+              }
+              chunks.push(chunk);
+            }
+            const data = Buffer.concat(chunks);
+            holdMethod = undefined;
+            heldResponse = {
+              summary: {
+                method: "media.get",
+                ok: response.statusCode === 200,
+                sizeBytes,
+                sha256: createHash("sha256").update(data).digest("hex"),
+              },
+              release: async () => {
+                if (res.destroyed) {
+                  return false;
+                }
+                res.writeHead(response.statusCode ?? 503, response.headers);
+                // A queued write is not completed delivery; close/error must
+                // keep the retirement proof from passing on HTTP cancellation.
+                const completion = finished(res, { cleanup: true }).then(
+                  () => true,
+                  () => false,
+                );
+                res.end(data);
+                return await completion;
+              },
+            };
+            record("response-held", heldResponse.summary);
+            heldWaiter?.();
+          })().catch(() => {
+            holdMethod = undefined;
+            heldWaiter?.(new Error("held media response failed"));
+            res.destroy();
+          });
+          return;
+        }
         res.writeHead(response.statusCode ?? 503, response.headers);
         response.pipe(res);
       },
     );
+    httpRequests.add(upstream);
+    upstream.once("close", () => httpRequests.delete(upstream));
     upstream.on("error", () => res.writeHead(503).end());
     req.pipe(upstream);
   });
@@ -158,6 +231,13 @@ export async function startQaGatewayRpcProxy({
           return;
         }
         methods.set(frame.id, frame.method);
+        if (observedMethods.includes(frame.method)) {
+          record("rpc-request", {
+            connection: id,
+            requestId: frame.id,
+            method: frame.method,
+          });
+        }
         if (frame.method === "connect") {
           record("connect-request", {
             connection: id,
@@ -185,6 +265,14 @@ export async function startQaGatewayRpcProxy({
       const method = methods.get(frame.id);
       if (frame.type === "res") {
         methods.delete(frame.id);
+        if (observedMethods.includes(method)) {
+          record("rpc-response", {
+            connection: id,
+            requestId: frame.id,
+            method,
+            ok: frame.ok,
+          });
+        }
         if (method === "connect" && frame.ok) {
           record("connect-success", { connection: id, scopes: frame.payload?.auth?.scopes });
         }
@@ -199,8 +287,13 @@ export async function startQaGatewayRpcProxy({
         if (holdMethod && method === holdMethod) {
           holdMethod = undefined;
           heldResponse = {
-            front,
-            raw,
+            release: () => {
+              if (front.readyState !== WebSocket.OPEN) {
+                return false;
+              }
+              front.send(raw);
+              return true;
+            },
             summary: {
               method,
               connection: id,
@@ -272,6 +365,11 @@ export async function startQaGatewayRpcProxy({
         peer.front.terminate();
         peer.back.terminate();
       }
+      for (const upstream of httpRequests) {
+        upstream.destroy();
+      }
+      await mediaTask;
+      heldResponse = undefined;
       server.closeAllConnections();
       await new Promise((resolve) => {
         sockets.close(resolve);

@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import OpenClawChatUI
 import OpenClawKit
@@ -14,6 +15,17 @@ struct NativeActionGatewayWireTests {
             let message: String
         }
 
+        struct Media: Decodable {
+            struct Session: Decodable {
+                let sessionKey: String
+                let artifactID: String
+            }
+
+            let pngBase64: String
+            let sha256: String
+            let sessions: [String: Session]
+        }
+
         let version: Int
         let gatewayURL: URL
         let controlURL: URL
@@ -22,6 +34,7 @@ struct NativeActionGatewayWireTests {
         let aliceProfileID: String
         let bobProfileID: String
         let cases: [String: Case]
+        let media: Media
 
         func control(_ action: String, fields: [String: String] = [:]) async throws -> ControlResponse {
             var request = URLRequest(url: self.controlURL)
@@ -50,6 +63,8 @@ struct NativeActionGatewayWireTests {
             let method: String
             let ok: Bool
             let runId: String?
+            let sha256: String?
+            let sizeBytes: Int?
         }
 
         let heldResponse: HeldResponse?
@@ -64,6 +79,7 @@ struct NativeActionGatewayWireTests {
         var presentationID: UUID?
         var binding: IOSNativeActionBinding?
         var chat: OpenClawChatViewModel?
+        var transport: IOSGatewayChatTransport?
 
         init(fixture: Fixture) {
             self.fixture = fixture
@@ -77,7 +93,8 @@ struct NativeActionGatewayWireTests {
                 self.model.focusChatSession(request.session.sessionKey)
                 if self.binding?.matches(binding) == true { return }
                 self.chat?.detachTransport()
-                let transport = IOSGatewayChatTransport(gateway: self.model.operatorSession, nativeBinding: binding)
+                let transport = try #require(
+                    self.model.makeChatTransport(nativeBinding: binding) as? IOSGatewayChatTransport)
                 let chat = OpenClawChatViewModel(
                     sessionKey: request.session.sessionKey,
                     transport: transport,
@@ -85,6 +102,7 @@ struct NativeActionGatewayWireTests {
                     sessionRoutingContract: binding.sessionRoutingContract)
                 self.binding = binding
                 self.chat = chat
+                self.transport = transport
                 self.router.registerChat(
                     chat,
                     ownerID: self.model.chatViewModelOwnerID,
@@ -157,6 +175,7 @@ struct NativeActionGatewayWireTests {
         func disconnect() async {
             self.chat?.detachTransport()
             self.chat = nil
+            self.transport = nil
             self.binding = nil
             self.model.setOperatorConnected(false)
             await self.model.operatorSession.disconnect()
@@ -204,6 +223,8 @@ struct NativeActionGatewayWireTests {
                 presentation, first: "aclSuspended", second: "acl", mutation: "revoke-acl")
             let aclControl = try await presentation.prepare("controlACL").submit()
             try await fixture.verify("controlACL", runID: aclControl.runID)
+            try await Self.verifyMedia(presentation, id: "controlACL", session: "controlACL", allowed: true)
+            try await Self.retireMediaResult(presentation)
 
             try await Self.retireAcceptedSubmission(presentation)
             try await Self.rejectAcrossSuspension(
@@ -211,6 +232,7 @@ struct NativeActionGatewayWireTests {
             let profileControl = try await presentation.prepare(
                 "controlProfile", profileID: fixture.bobProfileID).submit()
             try await fixture.verify("controlProfile", runID: profileControl.runID)
+            try await Self.verifyMedia(presentation, id: "controlProfile", session: "controlProfile", allowed: true)
         } catch {
             await presentation.close()
             throw error
@@ -236,6 +258,9 @@ struct NativeActionGatewayWireTests {
         let fixture = presentation.fixture
         let suspended = try await presentation.prepare(first)
         let beforeAdmission = try await presentation.prepare(second)
+        let retainedTransport = try #require(presentation.transport)
+        try await Self.verifyMedia(
+            presentation, id: "\(second)Allowed", session: second, allowed: true, transport: retainedTransport)
         _ = try await fixture.control("hold-response", fields: ["method": "users.self"])
         let submission = Task { @MainActor in try await suspended.submit() }
         do {
@@ -248,10 +273,91 @@ struct NativeActionGatewayWireTests {
             let direct = Task { @MainActor in try await beforeAdmission.submit() }
             try await Self.requireRejection(direct.result)
             try await fixture.verify(second)
+            try await Self.verifyMedia(
+                presentation, id: second, session: second, allowed: false, transport: retainedTransport)
         } catch {
             await presentation.disconnect()
             submission.cancel()
             _ = await submission.result
+            throw error
+        }
+    }
+
+    @MainActor
+    private static func verifyMedia(
+        _ presentation: Presentation,
+        id: String,
+        session: String,
+        allowed: Bool,
+        transport retained: (any OpenClawChatTransport)? = nil) async throws
+    {
+        let fixture = presentation.fixture
+        let media = try #require(fixture.media.sessions[session])
+        let transport = try #require(retained ?? presentation.transport)
+        _ = try await fixture.control("media-start", fields: ["case": id])
+        var fields = ["case": id, "outcome": allowed ? "allowed" : "rejected"]
+        if allowed {
+            let loaded = try await transport.loadMediaArtifact(
+                sessionKey: media.sessionKey, artifactId: media.artifactID, kind: .image, playback: nil)
+            guard case let .data(image) = loaded else {
+                throw OpenClawNativeActionError("The native media loader did not return image bytes.")
+            }
+            let expected = try #require(Data(base64Encoded: fixture.media.pngBase64))
+            try #require(image.mimeType == "image/png" && image.data == expected)
+            let digest = SHA256.hash(data: image.data).map { String(format: "%02x", $0) }.joined()
+            try #require(digest == fixture.media.sha256)
+            fields["sha256"] = digest
+        } else {
+            let rejection: Error?
+            do {
+                _ = try await transport.loadMediaArtifact(
+                    sessionKey: media.sessionKey, artifactId: media.artifactID, kind: .image, playback: nil)
+                rejection = nil
+            } catch {
+                rejection = error
+            }
+            let error = try #require(rejection, "Retired native media authority was accepted.")
+            try #require(!error.localizedDescription.isEmpty)
+        }
+        _ = try await fixture.control("media-complete", fields: fields)
+    }
+
+    @MainActor
+    private static func retireMediaResult(_ presentation: Presentation) async throws {
+        let fixture = presentation.fixture
+        let media = try #require(fixture.media.sessions["controlACL"])
+        let transport = try #require(presentation.transport)
+        _ = try await fixture.control("media-start", fields: ["case": "retiredResult"])
+        _ = try await fixture.control("hold-response", fields: ["method": "media.get"])
+        let loading = Task { @MainActor in
+            try await transport.loadMediaArtifact(
+                sessionKey: media.sessionKey, artifactId: media.artifactID, kind: .image, playback: nil)
+        }
+        var holding = false
+        do {
+            let held = try #require(try await fixture.control("wait-held").heldResponse)
+            holding = true
+            let expected = try #require(Data(base64Encoded: fixture.media.pngBase64))
+            try #require(held.method == "media.get" && held.ok)
+            try #require(held.sha256 == fixture.media.sha256 && held.sizeBytes == expected.count)
+            await presentation.disconnect()
+            _ = try await fixture.control("release-response")
+            holding = false
+            switch await loading.result {
+            case .success:
+                throw OpenClawNativeActionError("A retired media request published its held result.")
+            case let .failure(error):
+                try #require(error is CancellationError)
+            }
+            _ = try await fixture.control(
+                "media-complete", fields: ["case": "retiredResult", "outcome": "rejected"])
+            try await presentation.connect()
+            _ = try await presentation.prepare("controlACL")
+            try await Self.verifyMedia(presentation, id: "retiredControl", session: "controlACL", allowed: true)
+        } catch {
+            if holding { _ = try? await fixture.control("release-response") }
+            loading.cancel()
+            _ = await loading.result
             throw error
         }
     }
