@@ -13,6 +13,7 @@ final class MacNativeActionFixture: @unchecked Sendable {
     }
 
     let gateway: GatewayConnection
+    let sockets: GatewayTestWebSocketSession
     let profileID = LockIsolated("profile-one")
     let routeAuthority = LockIsolated<UInt64?>(nil)
     let requests = LockIsolated<[Data]>([])
@@ -139,6 +140,7 @@ final class MacNativeActionFixture: @unchecked Sendable {
                     capabilities: advertised))
             })
         }
+        self.sockets = sockets
         self.gateway = GatewayConnection(
             testEndpointProvider: {
                 .init(

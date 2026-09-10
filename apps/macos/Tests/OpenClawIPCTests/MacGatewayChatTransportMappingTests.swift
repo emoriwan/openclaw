@@ -128,8 +128,12 @@ struct MacGatewayChatTransportMappingTests {
                 connection: fixture.gateway,
                 outboxGatewayID: native ? nil : "local-store",
                 nativeBinding: native ? .init(owner: fixture.target.owner, lease: captured) : nil)
-            guard case let .available(lease) = await transport.acquireOutboxRouteLease(ifCurrentServerLease: captured)
-            else {
+            let acquired = if native {
+                await transport.acquireOutboxRouteLease(ifCurrentServerLease: captured)
+            } else {
+                await transport.acquireOutboxRouteLease()
+            }
+            guard case let .available(lease) = acquired else {
                 Issue.record("Expected a live routing lease")
                 await fixture.gateway.shutdown()
                 return
@@ -157,6 +161,100 @@ struct MacGatewayChatTransportMappingTests {
             try #require(history.count == 1)
             #expect(history[0]["expectedProfileId"] as? String == (native ? fixture.profileID.value : nil))
             #expect((history[0]["params"] as? [String: Any])?["sessionKey"] as? String == "agent:main:main")
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func `outbox leases distinguish ordinary reconnects from native socket retirement`(
+        native: Bool) async throws
+    {
+        let fixture = try MacNativeActionFixture()
+        do {
+            _ = try await fixture.gateway.request(method: "health", params: nil)
+            let original = try #require(await fixture.gateway.captureServerLease())
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                outboxGatewayID: native ? nil : "local-store",
+                nativeBinding: native ? .init(owner: fixture.target.owner, lease: original) : nil)
+            guard case let .available(lease) = await transport.acquireOutboxRouteLease() else {
+                Issue.record("Expected a live outbox lease")
+                throw CancellationError()
+            }
+            let originalSocket = try #require(fixture.sockets.latestTask())
+            // Retire only the socket. GatewayConnection.shutdown() would also
+            // retire the logical route and test a different ownership boundary.
+            originalSocket.emitReceiveFailure()
+            let deadline = ContinuousClock.now + .seconds(3)
+            while fixture.gateway.serverLeaseMatchesCurrentState(original), ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try #require(!fixture.gateway.serverLeaseMatchesCurrentState(original))
+            try #require(await fixture.gateway.isCurrentRoute(original.route))
+            _ = try await fixture.gateway.request(method: "health", params: nil)
+            let replacement = try #require(await fixture.gateway.captureServerLease())
+            try #require(replacement != original)
+            try #require(replacement.route == original.route)
+            try #require(await fixture.gateway.isCurrentServerLease(original) == false)
+            try #require(fixture.sockets.snapshotMakeCount() == 2)
+
+            if native {
+                guard case .unavailable = await transport.acquireOutboxRouteLease() else {
+                    Issue.record("A native binding acquired a lease on its replacement socket")
+                    throw CancellationError()
+                }
+                await #expect(throws: OpenClawChatTransportSendError.self) {
+                    _ = try await lease.sendMessage(
+                        sessionKey: "main", agentID: "main",
+                        message: "not dispatched", thinking: "off",
+                        idempotencyKey: "native-operation", attachments: [])
+                }
+                await #expect(throws: OpenClawChatTransportSendError.self) {
+                    _ = try await lease.requestHistory(sessionKey: "main", agentID: "main")
+                }
+                #expect(try fixture.frames(method: "chat.send").isEmpty)
+                #expect(try fixture.frames(method: "chat.history").isEmpty)
+                #expect(fixture.sockets.snapshotMakeCount() == 2)
+                await fixture.gateway.shutdown()
+                return
+            }
+
+            let response = try await lease.sendMessage(
+                sessionKey: "main",
+                agentID: "main",
+                expectedSessionSettings: .init(permissionMode: .guarded, toolOverrides: nil),
+                message: "queued before reconnect",
+                thinking: "off",
+                idempotencyKey: "queued-operation",
+                attachments: [])
+            #expect(response.runId == "gateway-accepted-run")
+            #expect(response.status == "started")
+            let history = try await lease.requestHistory(sessionKey: "main", agentID: "main")
+            #expect(history.sessionInfo?.key == "agent:main:main")
+            #expect(history.sessionInfo?.agentId == "main")
+
+            let sends = try fixture.frames(method: "chat.send")
+            try #require(sends.count == 1)
+            #expect(sends[0]["expectedProfileId"] == nil)
+            let params = try #require(sends[0]["params"] as? [String: Any])
+            #expect(params["sessionKey"] as? String == "agent:main:main")
+            #expect(params["agentId"] as? String == "main")
+            #expect(params["message"] as? String == "queued before reconnect")
+            #expect(params["thinking"] as? String == "off")
+            #expect(params["idempotencyKey"] as? String == "queued-operation")
+            #expect(params["expectedSessionRoutingContract"] as? String == "per-sender|main|main")
+            #expect(params["expectedPermissionMode"] as? String == "guarded")
+            #expect(params["expectedToolOverrides"] is NSNull)
+            let histories = try fixture.frames(method: "chat.history")
+            try #require(histories.count == 1)
+            #expect(histories[0]["expectedProfileId"] == nil)
+            let historyParams = try #require(histories[0]["params"] as? [String: Any])
+            #expect(historyParams["sessionKey"] as? String == "agent:main:main")
+            #expect(historyParams["agentId"] as? String == "main")
+            #expect(fixture.sockets.snapshotMakeCount() == 2)
         } catch {
             await fixture.gateway.shutdown()
             throw error
@@ -407,7 +505,11 @@ struct MacGatewayChatTransportMappingTests {
                 connection: fixture.gateway,
                 outboxGatewayID: scenario == "ordinary" ? "local-store" : nil,
                 nativeBinding: scenario == "ordinary" ? nil : .init(owner: fixture.target.owner, lease: original))
-            let acquired = await transport.acquireOutboxRouteLease(ifCurrentServerLease: original)
+            let acquired = if scenario == "ordinary" {
+                await transport.acquireOutboxRouteLease()
+            } else {
+                await transport.acquireOutboxRouteLease(ifCurrentServerLease: original)
+            }
             guard case let .available(captured) = acquired else {
                 Issue.record("Expected a live send lease")
                 throw CancellationError()
