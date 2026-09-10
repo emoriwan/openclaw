@@ -5064,7 +5064,7 @@ jobs:
         run: pnpm ios:build
 
       - name: Prove native iOS actions against a real Gateway
-        if: matrix.phase == 'smoke' && needs.preflight.outputs.compatibility_target != 'true'
+        if: (matrix.phase == 'smoke' || matrix.phase == 'tests') && needs.preflight.outputs.compatibility_target != 'true'
         env:
           OPENCLAW_BUILD_PRIVATE_QA: "1"
         run: |
