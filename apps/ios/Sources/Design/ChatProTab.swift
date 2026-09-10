@@ -547,6 +547,7 @@ struct ChatProTab: View {
         // One gateway facade backs both seams while routing cache and outbox
         // operations to their separate installation-wide databases.
         let binding = self.nativeBinding
+        let presentationID = self.nativePresentationID
         let offlineStore = binding == nil ? self.appModel.makeChatOfflineStore() : nil
         let voiceNoteRecorder = self.appModel.voiceNoteRecorder
         let transport = self.appModel.makeChatTransport(
@@ -578,9 +579,13 @@ struct ChatProTab: View {
             attachmentOwnerIsActive: { voiceNoteRecorder.ownsPendingChatAttachment },
             transcriptCache: offlineStore,
             outbox: offlineStore,
-            onSessionChanged: { sessionKey in
-                if let binding, self.viewModelTransport?.nativeBinding?.matches(binding) != true { return }
-                appModel.focusChatSession(sessionKey)
+            // The model owns this callback; capturing the view retains its model-bearing State.
+            onSessionChanged: { [weak nativeActions = self.nativeActions] sessionKey in
+                if let binding {
+                    nativeActions?.chatSessionChanged(sessionKey, binding: binding, presentationID: presentationID)
+                } else {
+                    appModel.focusChatSession(sessionKey)
+                }
             },
             onToolActivity: { id, name, isActive, toolSessionKey in
                 if isActive {

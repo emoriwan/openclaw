@@ -63,6 +63,16 @@ final class NativeActionRouter: OpenClawNativeActionHost {
         self.chatPresentationID = nil
     }
 
+    func chatSessionChanged(_ sessionKey: String, binding: IOSNativeActionBinding, presentationID: UUID?) {
+        // Adoption already changed the model's key. Validate its presentation owner,
+        // not isCurrent(PresentedChat)'s old-session equality and loading state.
+        guard let presentationID, self.presentation?.id == presentationID,
+              self.chatPresentationID == presentationID, self.chat != nil,
+              self.chatTransport?.nativeBinding?.matches(binding) == true
+        else { return }
+        self.appModel.focusChatSession(sessionKey)
+    }
+
     func acknowledgeInspection(_ run: OpenClawNativeRunRef, presentationID: UUID?) {
         guard let presentationID, self.presentation?.id == presentationID,
               self.inspection?.run == run else { return }
