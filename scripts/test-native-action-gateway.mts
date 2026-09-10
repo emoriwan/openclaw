@@ -711,6 +711,7 @@ export async function withNativeActionGateway(
                 [...SKILL_LIBRARY_WRITER_SCOPES, "operator.approvals"].toSorted(),
               );
             }
+            completedApprovals = true;
           }
           assert(pairedDevices.size > 0, "no real native device pairing was approved");
           for (const request of proxy
@@ -759,7 +760,6 @@ export async function withNativeActionGateway(
       completedCases = [...completed];
       completedMedia = [...mediaCompleted];
       completedWidgets = [...widgetsCompleted];
-      completedApprovals = approvalPhase === "complete";
     },
   );
   console.log(
