@@ -279,7 +279,7 @@ import UIKit
                         sessionKey: session.sessionKey,
                         transport: transport,
                         activeAgentId: session.agentID,
-                        sessionRoutingContract: nil,
+                        sessionRoutingContract: binding.sessionRoutingContract,
                         transcriptCache: nil,
                         outbox: nil)
                     chat = viewModel
