@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { detectChangedScope } from "../../scripts/ci-changed-scope.mjs";
+import type { NativeActionFixtureDescriptor } from "../../scripts/test-native-action-gateway.mts";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const repo = path.resolve(import.meta.dirname, "../..");
@@ -15,6 +16,11 @@ const swiftStep = workflow.jobs["macos-swift"].steps.find(
 ).run as string;
 
 function nativeActionDescriptor() {
+  const wireCase = (id: string) => ({
+    sessionKey: `agent:qa:${id}`,
+    marker: `NATIVE-${id}`,
+    message: `Fixture message ${id}`,
+  });
   return {
     version: 1,
     gatewayURL: "ws://127.0.0.1:43121",
@@ -23,24 +29,61 @@ function nativeActionDescriptor() {
     gatewayID: "native-action-fixture",
     aliceProfileID: "profile-alice",
     bobProfileID: "profile-bob",
-    cases: Object.fromEntries(
-      [
-        "allowed",
-        "distinct",
-        "foreign",
-        "acl",
-        "aclSuspended",
-        "controlACL",
-        "accepted",
-        "profile",
-        "profileSuspended",
-        "controlProfile",
-      ].map((id) => [
-        id,
-        { sessionKey: `agent:qa:${id}`, marker: `NATIVE-${id}`, message: `Fixture message ${id}` },
-      ]),
-    ),
-  };
+    cases: {
+      allowed: wireCase("allowed"),
+      distinct: wireCase("distinct"),
+      foreign: wireCase("foreign"),
+      acl: wireCase("acl"),
+      aclSuspended: wireCase("aclSuspended"),
+      controlACL: wireCase("controlACL"),
+      accepted: wireCase("accepted"),
+      profile: wireCase("profile"),
+      profileSuspended: wireCase("profileSuspended"),
+      controlProfile: wireCase("controlProfile"),
+    },
+    media: {
+      pngBase64:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Z0nQAAAAASUVORK5CYII=",
+      sha256: "65deda782bef8ddd50b7e5d3d426fbcfafa4d9ac63bb0e56675b6b46893d51c9",
+      sessions: {
+        acl: { sessionKey: "agent:qa:acl", artifactID: "artifact_managed_image_acl" },
+        controlACL: {
+          sessionKey: "agent:qa:controlACL",
+          artifactID: "artifact_managed_image_controlACL",
+        },
+        profile: { sessionKey: "agent:qa:profile", artifactID: "artifact_managed_image_profile" },
+        controlProfile: {
+          sessionKey: "agent:qa:controlProfile",
+          artifactID: "artifact_managed_image_controlProfile",
+        },
+      },
+    },
+    approvals: {
+      gatewayURL: "ws://127.0.0.1:43123/",
+      requests: {
+        allowed: {
+          id: "native-approval-allowed",
+          sessionKey: "agent:qa:controlProfile",
+          command: "printf native-approval-allowed",
+        },
+        visible: {
+          id: "native-approval-visible",
+          sessionKey: "agent:qa:controlProfile",
+          command: "printf native-approval-visible",
+        },
+        queued: {
+          id: "native-approval-queued",
+          sessionKey: "agent:qa:controlProfile",
+          command: "printf native-approval-queued",
+        },
+        control: {
+          id: "native-approval-control",
+          sessionKey: "agent:qa:controlACL",
+          command: "printf native-approval-control",
+        },
+      },
+    },
+  } satisfies NativeActionFixtureDescriptor;
 }
 
 function fixture(
@@ -350,6 +393,145 @@ describe.skipIf(process.platform === "win32")("native test launch ownership", ()
     ["extra environment field", { OPENCLAW_GATEWAY_TOKEN: "synthetic" }],
     ["missing cases", { cases: {} }],
     ["oversized identity", { aliceProfileID: "a".repeat(257) }],
+    ["missing media", { media: undefined }],
+    ["missing approvals", { approvals: undefined }],
+    [
+      "invalid media digest",
+      { media: { ...nativeActionDescriptor().media, sha256: "not-a-digest" } },
+    ],
+    [
+      "extra media field",
+      { media: { ...nativeActionDescriptor().media, headers: { authorization: "synthetic" } } },
+    ],
+    ...["missing", "substituted"].flatMap((scenario) => {
+      const descriptor = nativeActionDescriptor();
+      return [
+        [
+          `${scenario} media session`,
+          {
+            media: {
+              ...descriptor.media,
+              sessions: {
+                ...descriptor.media.sessions,
+                acl: undefined,
+                ...(scenario === "substituted"
+                  ? { unexpected: descriptor.media.sessions.acl }
+                  : {}),
+              },
+            },
+          },
+        ],
+        [
+          `${scenario} approval request`,
+          {
+            approvals: {
+              ...descriptor.approvals,
+              requests: {
+                ...descriptor.approvals.requests,
+                allowed: undefined,
+                ...(scenario === "substituted"
+                  ? { unexpected: descriptor.approvals.requests.allowed }
+                  : {}),
+              },
+            },
+          },
+        ],
+      ] as const;
+    }),
+    [
+      "oversized artifact identity",
+      {
+        media: {
+          ...nativeActionDescriptor().media,
+          sessions: {
+            ...nativeActionDescriptor().media.sessions,
+            acl: { sessionKey: "agent:qa:acl", artifactID: "a".repeat(257) },
+          },
+        },
+      },
+    ],
+    [
+      "extra media session field",
+      {
+        media: {
+          ...nativeActionDescriptor().media,
+          sessions: {
+            ...nativeActionDescriptor().media.sessions,
+            acl: { ...nativeActionDescriptor().media.sessions.acl, ticket: "synthetic" },
+          },
+        },
+      },
+    ],
+    [
+      "remote approval Gateway",
+      {
+        approvals: {
+          ...nativeActionDescriptor().approvals,
+          gatewayURL: "ws://approval.example.test:43123/",
+        },
+      },
+    ],
+    [
+      "approval URL credentials",
+      {
+        approvals: {
+          ...nativeActionDescriptor().approvals,
+          gatewayURL: "ws://fixture-user@127.0.0.1:43123/",
+        },
+      },
+    ],
+    [
+      "approval URL without explicit port",
+      {
+        approvals: {
+          ...nativeActionDescriptor().approvals,
+          gatewayURL: "ws://127.0.0.1/",
+        },
+      },
+    ],
+    ...[
+      ["approval URL query", "ws://127.0.0.1:43123/?token=synthetic"],
+      ["approval URL hash", "ws://127.0.0.1:43123/#synthetic"],
+      ["approval URL path", "ws://127.0.0.1:43123/non-root"],
+      ["approval URL protocol", "http://127.0.0.1:43123/"],
+    ].map(
+      ([label, gatewayURL]) =>
+        [label, { approvals: { ...nativeActionDescriptor().approvals, gatewayURL } }] as const,
+    ),
+    [
+      "extra approvals field",
+      { approvals: { ...nativeActionDescriptor().approvals, token: "synthetic" } },
+    ],
+    [
+      "oversized approval command",
+      {
+        approvals: {
+          ...nativeActionDescriptor().approvals,
+          requests: {
+            ...nativeActionDescriptor().approvals.requests,
+            allowed: {
+              ...nativeActionDescriptor().approvals.requests.allowed,
+              command: "a".repeat(2049),
+            },
+          },
+        },
+      },
+    ],
+    [
+      "extra approval request field",
+      {
+        approvals: {
+          ...nativeActionDescriptor().approvals,
+          requests: {
+            ...nativeActionDescriptor().approvals.requests,
+            allowed: {
+              ...nativeActionDescriptor().approvals.requests.allowed,
+              env: { OPENCLAW_GATEWAY_TOKEN: "synthetic" },
+            },
+          },
+        },
+      },
+    ],
   ] as const)("rejects %s before Keychain or Swift launch", (_label, override) => {
     const f = fixture();
     const result = spawnSync(

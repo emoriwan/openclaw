@@ -48,6 +48,8 @@ await runWithFailedTrailer("macos-native", async () => {
       "aliceProfileID",
       "bobProfileID",
       "cases",
+      "media",
+      "approvals",
     ];
     const caseIDs = [
       "allowed",
@@ -97,11 +99,60 @@ await runWithFailedTrailer("macos-native", async () => {
     ) {
       throw new Error("Invalid native action fixture descriptor.");
     }
-    for (const [key, protocol] of [
-      ["gatewayURL", "ws:"],
-      ["controlURL", "http:"],
+    const media = fixture.media;
+    const mediaSessionIDs = ["acl", "controlACL", "profile", "controlProfile"];
+    if (
+      !isRecord(media) ||
+      Object.keys(media).length !== 3 ||
+      !boundedText(media.pngBase64, 32_768) ||
+      typeof media.sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(media.sha256)
+    ) {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    const mediaSessions = media.sessions;
+    if (
+      !isRecord(mediaSessions) ||
+      Object.keys(mediaSessions).length !== mediaSessionIDs.length ||
+      !mediaSessionIDs.every((id) => {
+        const entry = mediaSessions[id];
+        return (
+          isRecord(entry) &&
+          Object.keys(entry).length === 2 &&
+          boundedText(entry.sessionKey, 256) &&
+          boundedText(entry.artifactID, 256)
+        );
+      })
+    ) {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    const approvals = fixture.approvals;
+    if (!isRecord(approvals) || Object.keys(approvals).length !== 2) {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    const requests = approvals.requests;
+    const approvalIDs = ["allowed", "visible", "queued", "control"];
+    if (
+      !isRecord(requests) ||
+      Object.keys(requests).length !== approvalIDs.length ||
+      !approvalIDs.every((id) => {
+        const entry = requests[id];
+        return (
+          isRecord(entry) &&
+          Object.keys(entry).length === 3 &&
+          boundedText(entry.id, 256) &&
+          boundedText(entry.sessionKey, 256) &&
+          boundedText(entry.command, 2048)
+        );
+      })
+    ) {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    for (const [value, protocol] of [
+      [fixture.gatewayURL, "ws:"],
+      [fixture.controlURL, "http:"],
+      [approvals.gatewayURL, "ws:"],
     ] as const) {
-      const value = fixture[key];
       const url = typeof value === "string" && value.length <= 256 ? URL.parse(value) : null;
       if (
         !url ||
