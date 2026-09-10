@@ -4404,6 +4404,153 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         await gateway.disconnect()
     }
 
+    @Test(arguments: [false, true])
+    @MainActor func `background rotation retires native Talk only after its last Node waiter`(
+        withCurrentWaiter: Bool) async throws
+    {
+        let keys = ["talk.enabled", VoiceWakePreferences.enabledKey]
+        let previousValues = keys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
+        for key in keys {
+            UserDefaults.standard.set(false, forKey: key)
+        }
+        let talk = TalkModeManager(allowSimulatorCapture: true)
+        let appModel = NodeAppModel(talkMode: talk)
+        let gateway = appModel.operatorSession
+        let firstBarrier = TalkPreparationBarrier()
+        let currentBarrier = TalkPreparationBarrier()
+        let cleanup = TalkPreparationBarrier()
+        let (_, publicationSink) = AsyncStream<(Bool, EventFrame)>.makeStream()
+        let (_, configProfileSink) = AsyncStream<String?>.makeStream()
+        let (_, closeSink) = AsyncStream<Void>.makeStream()
+        var waiters: [Task<Void, Error>] = []
+        var attempts: [TalkModeManager.StartAttempt] = []
+        var firstEntered = false
+        var currentEntered = false
+        var currentWaiterFinished = false
+        defer {
+            talk._test_setStartEntryHandler(nil)
+            talk.resumeAfterBackground()
+            appModel.voiceWake.stop()
+            for (key, previous) in previousValues {
+                if let previous {
+                    UserDefaults.standard.set(previous, forKey: key)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+            }
+        }
+        let result: Result<Void, Error>
+        do {
+            let binding = try await connectNativeTalkCleanupGateway(
+                gateway,
+                publications: publicationSink,
+                configProfiles: configProfileSink,
+                cleanup: cleanup,
+                closed: closeSink)
+            appModel.setOperatorConnected(true)
+            talk.attachGateway(gateway)
+            talk.updateGatewayConnected(true)
+            talk._test_setStartEntryHandler {
+                firstEntered = true
+                await firstBarrier.suspendFirstPreparation()
+            }
+            let first = Task { @MainActor in
+                try await appModel.startNativeTalk(nativeBinding: binding, presentationIsCurrent: { true })
+            }
+            waiters.append(first)
+            try #require(await waitForMainActorWork { firstEntered })
+            let firstAttempt = try #require(talk.setEnabled(true, nativeBinding: binding))
+            attempts.append(firstAttempt)
+
+            talk.suspendForBackground()
+            talk._test_setStartEntryHandler {
+                currentEntered = true
+                await currentBarrier.suspendFirstPreparation()
+            }
+            talk.resumeAfterBackground()
+            try #require(await waitForMainActorWork { currentEntered })
+            let currentAttempt = try #require(talk.setEnabled(true, nativeBinding: binding))
+            attempts.append(currentAttempt)
+            try #require(firstAttempt.callID == currentAttempt.callID)
+
+            var currentWaiter: Task<Void, Error>?
+            if withCurrentWaiter {
+                var presentationChecks = 0
+                let current = Task { @MainActor in
+                    defer { currentWaiterFinished = true }
+                    try await appModel.startNativeTalk(nativeBinding: binding, presentationIsCurrent: {
+                        presentationChecks += 1
+                        if presentationChecks == 3 {
+                            // Source-coupled gate: the third check is immediately before admission.
+                            // No await separates it from joining via applyTalkEnabled on MainActor,
+                            // so the released old waiter cannot settle before this waiter joins.
+                            firstBarrier.release()
+                        }
+                        return true
+                    })
+                }
+                currentWaiter = current
+                waiters.append(current)
+                try #require(await waitForMainActorWork { presentationChecks == 3 || currentWaiterFinished })
+                try #require(presentationChecks == 3)
+            } else {
+                firstBarrier.release()
+            }
+            do {
+                try await first.value
+                Issue.record("The old Node waiter must cancel after background rotation")
+            } catch is CancellationError {}
+
+            #expect(talk.isEnabled == withCurrentWaiter)
+            #expect(talk.ownsNativeCall(firstAttempt.callID) == withCurrentWaiter)
+            #expect((talk.activeNativeBinding?.matches(binding) == true) == withCurrentWaiter)
+            #expect(UserDefaults.standard.bool(forKey: "talk.enabled") == withCurrentWaiter)
+            #expect(!currentWaiterFinished)
+            #expect(!talk.isListening)
+            #expect(!talk._test_audioSessionIsActive())
+
+            // Cancel before releasing the pre-permission gate; neither case may capture audio.
+            talk.suspendForBackground()
+            currentBarrier.release()
+            if let currentWaiter {
+                do {
+                    try await currentWaiter.value
+                    Issue.record("The last Node waiter must cancel after background suspension")
+                } catch is CancellationError {}
+            }
+            if case .cancelled = await currentAttempt.result.value {} else {
+                Issue.record("The rotated startup must cancel before microphone admission")
+            }
+            #expect(!talk.isEnabled)
+            #expect(talk.activeNativeBinding == nil)
+            #expect(!UserDefaults.standard.bool(forKey: "talk.enabled"))
+            #expect(!talk.isListening)
+            #expect(!talk._test_audioSessionIsActive())
+            result = .success(())
+        } catch {
+            result = .failure(error)
+        }
+        for waiter in waiters {
+            waiter.cancel()
+        }
+        appModel.setOperatorConnected(false)
+        talk.stop()
+        firstBarrier.release()
+        currentBarrier.release()
+        cleanup.release()
+        for waiter in waiters {
+            _ = await waiter.result
+        }
+        for attempt in attempts {
+            _ = await attempt.result.value
+        }
+        publicationSink.finish()
+        configProfileSink.finish()
+        closeSink.finish()
+        await gateway.disconnect()
+        try result.get()
+    }
+
     @Test(arguments: [false, true], ["changed", "round-trip", "preexisting"])
     @MainActor func `retired native cleanup preserves foreground selection and does not stop its successor`(
         incomingGlobalStop: Bool,

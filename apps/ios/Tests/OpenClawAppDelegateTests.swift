@@ -343,6 +343,13 @@ import UIKit
         switch method {
         case "users.self":
             return .success(["profile": ["id": session.owner.profileID]])
+        case "agents.list":
+            return .success([
+                "defaultId": "main",
+                "mainKey": "main",
+                "scope": "per-sender",
+                "agents": [["id": "main"]],
+            ])
         case "chat.history":
             #expect(params["sessionKey"] as? String == session.sessionKey)
             #expect(params["agentId"] as? String == session.agentID)
