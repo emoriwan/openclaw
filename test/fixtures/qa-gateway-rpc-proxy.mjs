@@ -6,6 +6,18 @@ import path from "node:path";
 import { finished } from "node:stream/promises";
 import { pathToFileURL } from "node:url";
 
+/**
+ * @param {{
+ *   backendPort: number,
+ *   repoRoot: string,
+ *   recordPath?: string,
+ *   token?: string,
+ *   port?: number,
+ *   upstreamHeaders?: import("ws").ClientOptions["headers"],
+ *   observedMethods?: readonly string[],
+ *   mediaPaths?: ReadonlySet<string>
+ * }} options
+ */
 export async function startQaGatewayRpcProxy({
   backendPort,
   repoRoot,
