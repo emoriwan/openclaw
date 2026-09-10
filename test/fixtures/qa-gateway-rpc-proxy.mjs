@@ -87,7 +87,7 @@ export async function startQaGatewayRpcProxy({
           }
         } else if (action === "hold-response") {
           if (
-            !["users.self", "chat.send", "media.get"].includes(input.method) ||
+            !["users.self", "chat.send", "media.get", "talk.client.close"].includes(input.method) ||
             holdMethod ||
             heldResponse
           ) {
