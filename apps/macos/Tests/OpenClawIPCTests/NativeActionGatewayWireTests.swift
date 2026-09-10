@@ -150,7 +150,8 @@ struct NativeActionGatewayWireTests {
                 try #require(pairing.paired == true)
                 _ = try await connection.acquireServerLease()
                 let hello = try #require(await connection.lastSnapshot)
-                let scopes = try #require(hello.auth["scopes"]?.arrayValue?.compactMap(\.stringValue))
+                let scopeValues = try #require(hello.auth["scopes"]?.arrayValue)
+                let scopes = scopeValues.compactMap(\.stringValue)
                 try #require(Set(scopes) == ["operator.read", "operator.write"])
                 try #require(!scopes.contains("operator.admin"))
 
