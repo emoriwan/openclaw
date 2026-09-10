@@ -25,7 +25,7 @@ final class MacNativeActionFixture: @unchecked Sendable {
     ])
     let heldRequest = LockIsolated<(GatewayTestWebSocketTask, Data)?>(nil)
     let healthOK = LockIsolated(true)
-    let historySessionInfo = LockIsolated<[String: Any]?>(nil)
+    let historySessionInfo = LockIsolated<[String: String]?>(nil)
     let holdObserverHides = LockIsolated(false)
     let profileRejections = LockIsolated<[String]>([])
     let artifactUsesHTTP = LockIsolated(false)
