@@ -60,6 +60,7 @@ private struct MacNativeWireControlResponse: Decodable, Sendable {
     let verified: String?
     let completed: String?
     let heldResponse: HeldResponse?
+    let canvasOrigin: URL?
 }
 
 @MainActor
@@ -355,13 +356,16 @@ struct NativeActionGatewayWireTests {
         replacing resource: OpenClawChatWidgetResource?,
         allowed: Bool) async throws -> OpenClawChatWidgetResource?
     {
-        try await control.request("widget-start", fields: ["case": id])
+        let started = try await control.request("widget-start", fields: ["case": id])
+        let canvasOrigin = try #require(started.canvasOrigin)
         let resolved = await transport.resolveInlineWidgetResource(
             path: "/__openclaw__/canvas/documents/native.html", replacing: resource)
         if allowed {
             let value = try #require(resolved)
-            try #require(value.url.host == control.descriptor.gatewayURL.host)
-            try #require(value.url.port == control.descriptor.gatewayURL.port)
+            // Canvas advertises the backend HTTP authority, not the WebSocket proxy's port.
+            try #require(value.url.scheme == canvasOrigin.scheme)
+            try #require(value.url.host == canvasOrigin.host)
+            try #require(value.url.port == canvasOrigin.port)
         } else {
             try #require(resolved == nil)
             try #require(!transport.nativeBindingIsCurrent)

@@ -348,7 +348,7 @@ export async function withNativeActionGateway(
             const id = input.case as WidgetCaseID;
             assert(!widgetAttempt && !widgetsCompleted.has(id));
             widgetAttempt = { id, before: proxy.snapshot() };
-            return { started: id };
+            return { started: id, canvasOrigin: `http://127.0.0.1:${instance.port}` };
           }
           case "widget-complete": {
             assert(widgetAttempt && widgetAttempt.id === input.case);
