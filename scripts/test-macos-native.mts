@@ -24,6 +24,105 @@ await runWithFailedTrailer("macos-native", async () => {
   if (profileMode !== "default" && profileMode !== "named") {
     throw new Error("Select default or named profile semantics before the Swift test arguments.");
   }
+  let nativeActionFixture: string | undefined;
+  const fixtureIndex = args.indexOf("--native-action-fixture");
+  if (fixtureIndex !== -1) {
+    const raw = args[fixtureIndex + 1];
+    if (!raw || raw.length > 32_768) {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    // This plain-Node launcher must also work before workspace packages are built.
+    const { isRecord } = await import("../packages/normalization-core/src/record-coerce.ts");
+    let fixture: unknown;
+    try {
+      fixture = JSON.parse(raw);
+    } catch {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    const fields = [
+      "version",
+      "gatewayURL",
+      "controlURL",
+      "controlToken",
+      "gatewayID",
+      "aliceProfileID",
+      "bobProfileID",
+      "cases",
+    ];
+    const caseIDs = [
+      "allowed",
+      "distinct",
+      "foreign",
+      "acl",
+      "aclSuspended",
+      "controlACL",
+      "accepted",
+      "profile",
+      "profileSuspended",
+      "controlProfile",
+    ];
+    const boundedText = (value: unknown, maximum: number) =>
+      typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= maximum &&
+      !value.includes("\0");
+    if (
+      !isRecord(fixture) ||
+      fixture.version !== 1 ||
+      Object.keys(fixture).length !== fields.length ||
+      Object.keys(fixture).some((key) => !fields.includes(key)) ||
+      !["controlToken", "gatewayID", "aliceProfileID", "bobProfileID"].every((key) =>
+        boundedText(fixture[key], 256),
+      )
+    ) {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    const cases = fixture.cases;
+    if (
+      typeof fixture.controlToken !== "string" ||
+      !/^[a-zA-Z0-9-]{16,128}$/.test(fixture.controlToken) ||
+      fixture.aliceProfileID === fixture.bobProfileID ||
+      !isRecord(cases) ||
+      Object.keys(cases).length !== caseIDs.length ||
+      !caseIDs.every((id) => {
+        const entry = cases[id];
+        return (
+          isRecord(entry) &&
+          Object.keys(entry).length === 3 &&
+          boundedText(entry.sessionKey, 256) &&
+          boundedText(entry.marker, 256) &&
+          boundedText(entry.message, 2048)
+        );
+      })
+    ) {
+      throw new Error("Invalid native action fixture descriptor.");
+    }
+    for (const [key, protocol] of [
+      ["gatewayURL", "ws:"],
+      ["controlURL", "http:"],
+    ] as const) {
+      const value = fixture[key];
+      const url = typeof value === "string" && value.length <= 256 ? URL.parse(value) : null;
+      if (
+        !url ||
+        url.protocol !== protocol ||
+        url.hostname !== "127.0.0.1" ||
+        !url.port ||
+        url.username ||
+        url.password ||
+        url.pathname !== "/" ||
+        url.search ||
+        url.hash
+      ) {
+        throw new Error("Native action fixture endpoints must use explicit loopback ports.");
+      }
+    }
+    nativeActionFixture = JSON.stringify(fixture);
+    args.splice(fixtureIndex, 2);
+    if (args.includes("--native-action-fixture")) {
+      throw new Error("Provide exactly one native action fixture descriptor.");
+    }
+  }
   if (!args.includes("--skip-build")) {
     throw new Error(
       "Build tests first with swift build --build-tests; this launcher requires --skip-build.",
@@ -116,7 +215,14 @@ await runWithFailedTrailer("macos-native", async () => {
           return;
         }
       }
-      process.exitCode = await run("swift", ["test", ...args]);
+      try {
+        if (nativeActionFixture) {
+          childEnv.OPENCLAW_NATIVE_ACTION_FIXTURE = nativeActionFixture;
+        }
+        process.exitCode = await run("swift", ["test", ...args]);
+      } finally {
+        delete childEnv.OPENCLAW_NATIVE_ACTION_FIXTURE;
+      }
     } finally {
       // A completed failed create may leave a database. Never delete it until every child closed.
       if (canRemove && fs.existsSync(keychain)) {

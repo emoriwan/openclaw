@@ -4887,6 +4887,29 @@ jobs:
             exit 1
           fi
 
+      - name: Verify macOS native actions against Gateway
+        id: macos-native-action-gateway
+        if: matrix.phase == 'tests' && env.HISTORICAL_TARGET != 'true'
+        env:
+          OPENCLAW_BUILD_PRIVATE_QA: "1"
+        run: |
+          pnpm build qaRuntime
+          node --import ./scripts/tsx.mjs scripts/test-native-action-gateway.mts macos
+
+      - name: Verify macOS App Intents metadata
+        id: macos-app-intents
+        if: matrix.phase == 'tests' && env.HISTORICAL_TARGET != 'true'
+        run: /bin/bash scripts/test-macos-app-intents.sh "$RUNNER_TEMP/macos-app-intents.json"
+
+      - name: Upload macOS App Intents metadata
+        if: ${{ !cancelled() && steps.macos-app-intents.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-app-intents-metadata
+          path: ${{ runner.temp }}/macos-app-intents.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Render isolated macOS health fixtures
         id: health-render
         if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && !inputs.release_gate && needs.preflight.outputs.release_scope == 'full' && steps.swift-test.outputs.debug-tests-built == 'true' && hashFiles('scripts/test-macos-health-render.sh') != '' }}

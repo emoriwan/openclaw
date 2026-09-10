@@ -14,6 +14,35 @@ const swiftStep = workflow.jobs["macos-swift"].steps.find(
   (step: { name?: string }) => step.name === "Swift test",
 ).run as string;
 
+function nativeActionDescriptor() {
+  return {
+    version: 1,
+    gatewayURL: "ws://127.0.0.1:43121",
+    controlURL: "http://127.0.0.1:43122/",
+    controlToken: "synthetic-native-control-token",
+    gatewayID: "native-action-fixture",
+    aliceProfileID: "profile-alice",
+    bobProfileID: "profile-bob",
+    cases: Object.fromEntries(
+      [
+        "allowed",
+        "distinct",
+        "foreign",
+        "acl",
+        "aclSuspended",
+        "controlACL",
+        "accepted",
+        "profile",
+        "profileSuspended",
+        "controlProfile",
+      ].map((id) => [
+        id,
+        { sessionKey: `agent:qa:${id}`, marker: `NATIVE-${id}`, message: `Fixture message ${id}` },
+      ]),
+    ),
+  };
+}
+
 function fixture(
   defaultExitCode = 0,
   waitForSignal: false | "swift" | "security" = false,
@@ -125,6 +154,7 @@ if (tool === 'swift' && args[0] === 'test') {
     OPENCLAW_STATE_DIR: path.join(root, "ambient-state"),
     OPENCLAW_CONFIG_PATH: path.join(root, "ambient-config.json"),
     OPENCLAW_GATEWAY_TOKEN: "synthetic-not-a-credential",
+    OPENCLAW_NATIVE_ACTION_FIXTURE: "ambient-fixture-must-not-leak",
     DEVELOPER_DIR: "/synthetic/Xcode.app/Contents/Developer",
     DYLD_FRAMEWORK_PATH: "/synthetic/frameworks",
     DYLD_LIBRARY_PATH: "/synthetic/libraries",
@@ -213,6 +243,7 @@ describe.skipIf(process.platform === "win32")("native test launch ownership", ()
         }
         expect(test.env.OPENCLAW_PROFILE).not.toBe(f.env.OPENCLAW_PROFILE);
         expect(test.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+        expect(test.env.OPENCLAW_NATIVE_ACTION_FIXTURE).toBeUndefined();
         for (const key of [
           "DEVELOPER_DIR",
           "DYLD_FRAMEWORK_PATH",
@@ -275,6 +306,94 @@ describe.skipIf(process.platform === "win32")("native test launch ownership", ()
     expect(calls[0].env.OPENCLAW_PROFILE).not.toBe(calls[1].env.OPENCLAW_PROFILE);
     expect(calls[0].env.HOME).not.toBe(calls[1].env.HOME);
   });
+
+  it("forwards only the explicit native descriptor without changing Swift arguments or isolation", () => {
+    const f = fixture();
+    const descriptor = nativeActionDescriptor();
+    const swiftArgs = ["--skip-build", "--filter", "NativeActionGatewayWireTests"];
+    const result = spawnSync(
+      process.execPath,
+      [
+        "scripts/test-macos-native.mts",
+        "default",
+        "--native-action-fixture",
+        JSON.stringify(descriptor),
+        ...swiftArgs,
+      ],
+      { cwd: repo, env: f.env, encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const calls = f.calls();
+    const swift = calls.find((call) => call.tool === "swift");
+    expect(swift.args).toEqual(["test", ...swiftArgs]);
+    expect(JSON.parse(swift.env.OPENCLAW_NATIVE_ACTION_FIXTURE)).toEqual(descriptor);
+    expect(swift.env.OPENCLAW_GATEWAY_TOKEN).toBeUndefined();
+    expect(swift.env.HOME).not.toBe(f.env.HOME);
+    expect(swift.keychain).toEqual({ locked: false, autoLock: false });
+    expect(
+      calls
+        .filter((call) => call.tool === "security")
+        .every((call) => call.env.OPENCLAW_NATIVE_ACTION_FIXTURE === undefined),
+    ).toBe(true);
+    expect(calls.at(-1).args[0]).toBe("delete-keychain");
+    expect(fs.existsSync(path.dirname(swift.env.HOME))).toBe(false);
+  });
+
+  it.each([
+    ["remote Gateway", { gatewayURL: "ws://gateway.example.test:43121/" }],
+    ["remote controls", { controlURL: "http://control.example.test:43122/" }],
+    ["URL credentials", { controlURL: "http://fixture-user@127.0.0.1:43122/" }],
+    ["URL query", { gatewayURL: "ws://127.0.0.1:43121/?token=synthetic" }],
+    ["URL without explicit port", { controlURL: "http://127.0.0.1/" }],
+    ["control header injection", { controlToken: "synthetic-token\r\nx-other: value" }],
+    ["unsupported version", { version: 2 }],
+    ["extra environment field", { OPENCLAW_GATEWAY_TOKEN: "synthetic" }],
+    ["missing cases", { cases: {} }],
+    ["oversized identity", { aliceProfileID: "a".repeat(257) }],
+  ] as const)("rejects %s before Keychain or Swift launch", (_label, override) => {
+    const f = fixture();
+    const result = spawnSync(
+      process.execPath,
+      [
+        "scripts/test-macos-native.mts",
+        "default",
+        "--native-action-fixture",
+        JSON.stringify({ ...nativeActionDescriptor(), ...override }),
+        "--skip-build",
+      ],
+      { cwd: repo, env: f.env, encoding: "utf8" },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("fixture");
+    expect(fs.existsSync(f.log)).toBe(false);
+  });
+
+  it.each(["missing", "invalid JSON", "duplicate", "oversized"])(
+    "rejects a %s descriptor without exposing its contents",
+    (scenario) => {
+      const f = fixture();
+      const payload =
+        scenario === "invalid JSON"
+          ? "synthetic-do-not-print"
+          : scenario === "oversized"
+            ? "synthetic-do-not-print".repeat(2048)
+            : JSON.stringify(nativeActionDescriptor());
+      const fixtureArgs =
+        scenario === "missing" ? ["--native-action-fixture"] : ["--native-action-fixture", payload];
+      if (scenario === "duplicate") {
+        fixtureArgs.push("--native-action-fixture", payload);
+      }
+      const result = spawnSync(
+        process.execPath,
+        ["scripts/test-macos-native.mts", "default", "--skip-build", ...fixtureArgs],
+        { cwd: repo, env: f.env, encoding: "utf8" },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("fixture");
+      expect(result.stderr).not.toContain("synthetic-do-not-print");
+      expect(fs.existsSync(f.log)).toBe(false);
+    },
+  );
 
   it.each([
     [{ GITHUB_ACTIONS: "" }, ["named", "--skip-build"], "macos-swift"],
