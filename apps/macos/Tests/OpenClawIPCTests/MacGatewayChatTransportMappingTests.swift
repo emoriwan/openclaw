@@ -6,6 +6,332 @@ import Testing
 @testable import OpenClaw
 
 struct MacGatewayChatTransportMappingTests {
+    @Test func `native widgets acquire their initial surface and retire on a profile mismatch`() async throws {
+        let fixture = try MacNativeActionFixture()
+        do {
+            let lease = try await fixture.gateway.acquireServerLease()
+            let owner = fixture.target.owner
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                nativeBinding: .init(owner: owner, lease: lease))
+            let path = "/__openclaw__/canvas/documents/native.html"
+            let resource = try #require(await transport.resolveInlineWidgetResource(path: path, replacing: nil))
+            #expect(resource.url.path.contains("/cap/rotation-"))
+            #expect(try fixture.frames(method: "plugin.surface.refresh").count == 1)
+            fixture.profileID.setValue("another-profile")
+            #expect(await transport.resolveInlineWidgetResource(path: path, replacing: resource) == nil)
+            #expect(!transport.nativeBindingIsCurrent)
+            let frames = try fixture.frames(method: "plugin.surface.refresh")
+            #expect(frames.count == 2)
+            #expect(frames.allSatisfy { $0["expectedProfileId"] as? String == owner.profileID })
+            #expect(await transport.resolveInlineWidgetResource(path: path, replacing: nil) == nil)
+            #expect(try fixture.frames(method: "plugin.surface.refresh").count == 2)
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func `binding loss terminates the native event stream and prevents later RPCs`(
+        mismatchedRecipient: Bool) async throws
+    {
+        let fixture = try MacNativeActionFixture()
+        do {
+            let lease = try await fixture.gateway.acquireServerLease()
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                nativeBinding: .init(owner: fixture.target.owner, lease: lease))
+            var events = transport.events().makeAsyncIterator()
+            guard case .health(ok: true) = await events.next() else {
+                Issue.record("Expected the profile-bound initial health response")
+                await fixture.gateway.shutdown()
+                return
+            }
+            if mismatchedRecipient {
+                let frame = try JSONDecoder().decode(EventFrame.self, from: JSONSerialization.data(withJSONObject: [
+                    "type": "event", "event": "tick", "seq": 1, "recipientProfileId": "other-profile",
+                ]))
+                await fixture.gateway._test_handlePush(.event(frame), socketGeneration: lease.socketGeneration)
+            } else {
+                fixture.profileID.setValue("other-profile")
+                await #expect(throws: GatewayResponseError.self) {
+                    _ = try await transport.requestHistory(sessionKey: fixture.target.sessionKey)
+                }
+            }
+            guard case let .routeUnavailable(reason) = await events.next() else {
+                Issue.record("Missing terminal native-route loss")
+                await fixture.gateway.shutdown()
+                return
+            }
+            #expect(!reason.isEmpty)
+            #expect(await events.next() == nil)
+            #expect(!transport.nativeBindingIsCurrent)
+            #expect(await fixture.gateway.isCurrentServerLease(lease))
+            fixture.profileID.setValue(fixture.target.owner.profileID)
+            await #expect(throws: OpenClawChatTransportSendError.self) {
+                _ = try await transport.requestHistory(sessionKey: fixture.target.sessionKey)
+            }
+            #expect(try fixture.frames(method: "chat.history").count == (mismatchedRecipient ? 0 : 1))
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test func `native lease cannot borrow routing evidence from a replacement socket`() async throws {
+        let fixture = try MacNativeActionFixture(holding: "agents.list")
+        var pending: Task<OpenClawChatTransportRouteLeaseResult, Never>?
+        do {
+            _ = try await fixture.gateway.request(method: "health", params: nil)
+            let original = try #require(await fixture.gateway.captureServerLease())
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                nativeBinding: .init(owner: fixture.target.owner, lease: original))
+            let acquisition = Task { await transport.acquireOutboxRouteLease(ifCurrentServerLease: original) }
+            pending = acquisition
+            let deadline = ContinuousClock.now + .seconds(3)
+            while fixture.heldRequest.value == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try #require(fixture.heldRequest.value != nil)
+            await fixture.gateway.shutdown()
+            _ = try await fixture.gateway.request(method: "health", params: nil)
+            let replacement = try #require(await fixture.gateway.captureServerLease())
+            #expect(original != replacement)
+            fixture.releaseRequest()
+            guard case .unavailable = await acquisition.value else {
+                Issue.record("A retired physical socket produced a send lease")
+                await fixture.gateway.shutdown()
+                return
+            }
+            #expect(try fixture.frames(method: "agents.list").count == 1)
+            #expect(try fixture.frames(method: "chat.send").isEmpty)
+        } catch {
+            fixture.releaseRequest()
+            await fixture.gateway.shutdown()
+            _ = await pending?.value
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func `captured transport preserves canonical main routing and settings expectations`(native: Bool) async throws {
+        let fixture = try MacNativeActionFixture()
+        do {
+            _ = try await fixture.gateway.request(method: "health", params: nil)
+            let captured = try #require(await fixture.gateway.captureServerLease())
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                outboxGatewayID: native ? nil : "local-store",
+                nativeBinding: native ? .init(owner: fixture.target.owner, lease: captured) : nil)
+            guard case let .available(lease) = await transport.acquireOutboxRouteLease(ifCurrentServerLease: captured)
+            else {
+                Issue.record("Expected a live routing lease")
+                await fixture.gateway.shutdown()
+                return
+            }
+            let response = try await lease.sendMessage(
+                sessionKey: "main",
+                agentID: "main",
+                expectedSessionSettings: .init(permissionMode: .guarded, toolOverrides: nil),
+                message: "native",
+                thinking: "off",
+                idempotencyKey: "operation",
+                attachments: [])
+            #expect(response.runId == "gateway-accepted-run")
+            let frames = try fixture.frames(method: "chat.send")
+            try #require(frames.count == 1)
+            let frame = frames[0]
+            #expect(frame["expectedProfileId"] as? String == (native ? fixture.profileID.value : nil))
+            let params = try #require(frame["params"] as? [String: Any])
+            #expect(params["sessionKey"] as? String == "agent:main:main")
+            #expect(params["expectedSessionRoutingContract"] as? String == "per-sender|main|main")
+            #expect(params["expectedPermissionMode"] as? String == "guarded")
+            #expect(params["expectedToolOverrides"] is NSNull)
+            _ = try await lease.requestHistory(sessionKey: "main", agentID: "main")
+            let history = try fixture.frames(method: "chat.history")
+            try #require(history.count == 1)
+            #expect(history[0]["expectedProfileId"] as? String == (native ? fixture.profileID.value : nil))
+            #expect((history[0]["params"] as? [String: Any])?["sessionKey"] as? String == "agent:main:main")
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test func `native history and metadata never reacquire or drop the expected profile`() async throws {
+        let fixture = try MacNativeActionFixture()
+        do {
+            let lease = try await fixture.gateway.acquireServerLease()
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                defaultGlobalAgentID: fixture.target.agentID,
+                nativeBinding: .init(owner: fixture.target.owner, lease: lease))
+            _ = try await transport.requestHistory(sessionKey: fixture.target.sessionKey)
+            _ = try await transport.listSessions(limit: 50, search: nil, archived: false)
+            _ = try await transport.listAgents()
+            let options = try #require(await transport.acquireNewSessionRouteLease())
+            _ = try await options.listAgents()
+            for method in ["chat.history", "sessions.list", "agents.list"] {
+                let frames = try fixture.frames(method: method)
+                #expect(!frames.isEmpty)
+                #expect(frames.allSatisfy { $0["expectedProfileId"] as? String == fixture.profileID.value })
+            }
+            fixture.profileID.setValue("other-profile")
+            await #expect(throws: GatewayResponseError.self) {
+                _ = try await transport.requestHistory(sessionKey: fixture.target.sessionKey)
+            }
+            #expect(await fixture.gateway.isCurrentServerLease(lease))
+            await fixture.gateway.shutdown()
+            _ = try await fixture.gateway.acquireServerLease()
+            #expect(await transport.captureChatServerLease() == nil)
+            await #expect(throws: OpenClawChatTransportSendError.self) { _ = try await options.listAgents() }
+            #expect(try fixture.frames(method: "agents.list").count == 2)
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: ["profile-one", "other-profile", "missing"])
+    func `native events require an exact recipient profile on the captured physical lease`(
+        recipient: String) async throws
+    {
+        let fixture = try MacNativeActionFixture()
+        do {
+            let lease = try await fixture.gateway.acquireServerLease()
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                nativeBinding: .init(owner: fixture.target.owner, lease: lease))
+            var fields: [String: Any] = ["type": "event", "event": "tick", "seq": 1]
+            if recipient != "missing" { fields["recipientProfileId"] = recipient }
+            let event = try JSONDecoder().decode(
+                EventFrame.self, from: JSONSerialization.data(withJSONObject: fields))
+            let delivery = try #require(await fixture.gateway.makePushDelivery(.event(event)))
+            #expect(transport.acceptsNativeDelivery(delivery) == (recipient == fixture.target.owner.profileID))
+            let ordinary = MacGatewayChatTransport(connection: fixture.gateway)
+            #expect(ordinary.acceptsNativeDelivery(delivery))
+            await fixture.gateway.shutdown()
+            _ = try await fixture.gateway.acquireServerLease()
+            let replacement = try #require(await fixture.gateway.makePushDelivery(.event(event)))
+            #expect(!transport.acceptsNativeDelivery(replacement))
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func `canonical chat rejects a retired lease before dispatch`(send: Bool) async throws {
+        let fixture = try MacNativeActionFixture()
+        do {
+            let original = try await fixture.gateway.acquireServerLease()
+            await fixture.gateway.shutdown()
+            _ = try await fixture.gateway.acquireServerLease()
+            await #expect(throws: OpenClawChatTransportSendError.self) {
+                if send {
+                    _ = try await fixture.gateway.chatSend(
+                        sessionKey: "main",
+                        message: "native",
+                        thinking: "off",
+                        idempotencyKey: "operation",
+                        attachments: [],
+                        ifCurrentServerLease: original)
+                } else {
+                    _ = try await fixture.gateway.chatHistory(sessionKey: "main", ifCurrentServerLease: original)
+                }
+            }
+            #expect(try fixture.frames(method: send ? "chat.send" : "chat.history").isEmpty)
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: [false, true])
+    func `canonical send requires negotiated settings CAS and one route authority`(
+        conflictingRoutes: Bool) async throws
+    {
+        let fixture = try MacNativeActionFixture()
+        if !conflictingRoutes {
+            fixture.capabilities
+                .withValue { $0.removeAll { $0 == GatewayServerCapability.sessionSettingsCAS.rawValue } }
+        }
+        do {
+            let lease = try await fixture.gateway.acquireServerLease()
+            await #expect(throws: OpenClawChatTransportSendError.self) {
+                _ = try await fixture.gateway.chatSend(
+                    sessionKey: "main",
+                    expectedSessionSettings: .init(permissionMode: .guarded, toolOverrides: nil),
+                    message: "native",
+                    thinking: "off",
+                    idempotencyKey: "operation",
+                    attachments: [],
+                    ifCurrentRoute: conflictingRoutes ? lease.route : nil,
+                    ifCurrentServerLease: lease)
+            }
+            if conflictingRoutes {
+                await #expect(throws: OpenClawChatTransportSendError.self) {
+                    _ = try await fixture.gateway.chatHistory(
+                        sessionKey: "main", ifCurrentRoute: lease.route, ifCurrentServerLease: lease)
+                }
+            }
+            #expect(try fixture.frames(method: "chat.send").isEmpty)
+            #expect(try fixture.frames(method: "chat.history").isEmpty)
+        } catch {
+            await fixture.gateway.shutdown()
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: ["chat.send", "chat.history"])
+    func `canonical chat cannot adopt a replacement socket after dispatch`(method: String) async throws {
+        let fixture = try MacNativeActionFixture(holding: method)
+        var pending: Task<Void, Error>?
+        do {
+            let lease = try await fixture.gateway.acquireServerLease()
+            let request = Task {
+                if method == "chat.send" {
+                    _ = try await fixture.gateway.chatSend(
+                        sessionKey: "main",
+                        message: "native",
+                        thinking: "off",
+                        idempotencyKey: "operation",
+                        attachments: [],
+                        ifCurrentServerLease: lease)
+                } else {
+                    _ = try await fixture.gateway.chatHistory(sessionKey: "main", ifCurrentServerLease: lease)
+                }
+            }
+            pending = request
+            let deadline = ContinuousClock.now + .seconds(3)
+            while fixture.heldRequest.value == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try #require(fixture.heldRequest.value != nil)
+            await fixture.gateway.shutdown()
+            _ = try await fixture.gateway.acquireServerLease()
+            fixture.releaseRequest()
+            await #expect(throws: CancellationError.self) { try await request.value }
+            #expect(try fixture.frames(method: method).count == 1)
+        } catch {
+            fixture.releaseRequest()
+            await fixture.gateway.shutdown()
+            _ = try? await pending?.value
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
     private actor RequestRecorder {
         var payloads: [Data] = []
 

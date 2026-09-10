@@ -268,13 +268,7 @@ actor GatewayConnection: Observable {
         self.connectionPublication.withValue { $0 = .connected(admitted) }
     }
 
-    var canvasPluginSurfaceURL: String?
-
-    struct CanvasPluginSurfaceRefresh {
-        let id: UUID
-        let task: Task<GatewayCanvasHostRoute?, Never>
-    }
-
+    var canvasPluginSurface: CanvasPluginSurface?
     var canvasPluginSurfaceRefresh: CanvasPluginSurfaceRefresh?
 
     init(
@@ -549,10 +543,16 @@ actor GatewayConnection: Observable {
         method: String,
         params: [String: AnyCodable]?,
         timeoutMs: Double? = nil,
-        ifCurrentServerLease lease: ServerLease) async throws -> Data
+        ifCurrentServerLease lease: ServerLease,
+        expectedProfileId: String? = nil) async throws -> Data
     {
         guard await isCurrentServerLease(lease) else {
             throw OpenClawChatTransportSendError.notDispatched
+        }
+        if let expectedProfileId {
+            guard !expectedProfileId.isEmpty,
+                  await self.supportsServerCapability(.profileBinding, ifCurrentServerLease: lease) == true
+            else { throw OpenClawChatTransportSendError.notDispatched }
         }
         // Untagged channel cancellation can follow a send. Only the guard above
         // proves this wrapper rejected the request before dispatch.
@@ -562,7 +562,8 @@ actor GatewayConnection: Observable {
                 method: method,
                 params: params,
                 timeoutMs: timeoutMs,
-                ifCurrentConnectionGeneration: lease.socketGeneration))
+                ifCurrentConnectionGeneration: lease.socketGeneration,
+                expectedProfileId: expectedProfileId))
         } catch {
             result = .failure(error)
         }
@@ -663,6 +664,19 @@ extension GatewayConnection {
             timeoutMs: request.timeoutMs,
             ifCurrentRoute: route,
             distinguishPreDispatchRouteChange: distinguishPreDispatchRouteChange)
+    }
+
+    func request(
+        _ request: OpenClawChatGatewayRequest,
+        ifCurrentServerLease lease: ServerLease,
+        expectedProfileId: String? = nil) async throws -> Data
+    {
+        try await self.request(
+            method: request.method,
+            params: request.params,
+            timeoutMs: request.timeoutMs,
+            ifCurrentServerLease: lease,
+            expectedProfileId: expectedProfileId)
     }
 
     func requestDecoded<T: Decodable>(
@@ -865,22 +879,16 @@ extension GatewayConnection {
         _ capability: GatewayServerCapability,
         ifCurrentServerLease lease: ServerLease) async -> Bool?
     {
-        guard await self.isCurrentServerLease(lease),
-              self.serverLeaseMatchesCurrentState(lease),
-              let snapshot = lastSnapshot
-        else { return nil }
-        return snapshot.supportsServerCapability(capability)
+        guard await self.isCurrentServerLease(lease), self.serverLeaseMatchesCurrentState(lease) else { return nil }
+        return self.lastSnapshot?.supportsServerCapability(capability)
     }
 
     func supportsServerMethod(
         _ method: String,
         ifCurrentServerLease lease: ServerLease) async -> Bool?
     {
-        guard await self.isCurrentServerLease(lease),
-              self.serverLeaseMatchesCurrentState(lease),
-              let snapshot = lastSnapshot
-        else { return nil }
-        return snapshot.advertisedServerMethods()?.contains(method)
+        guard await self.isCurrentServerLease(lease), self.serverLeaseMatchesCurrentState(lease) else { return nil }
+        return self.lastSnapshot?.advertisedServerMethods()?.contains(method)
     }
 
     func isCurrentServerLease(_ lease: ServerLease) async -> Bool {
@@ -891,6 +899,13 @@ extension GatewayConnection {
               serverLeaseMatchesCurrentState(lease)
         else { return false }
         return true
+    }
+
+    func admittedHTTPContext(ifCurrentServerLease lease: ServerLease) async -> GatewayAdmittedHTTPContext? {
+        guard await self.isCurrentServerLease(lease) else { return nil }
+        let context = await lease.client.admittedHTTPContext(
+            ifCurrentConnectionGeneration: lease.socketGeneration)
+        return await self.isCurrentServerLease(lease) ? context : nil
     }
 
     func activationOwnershipFingerprint(
@@ -1139,7 +1154,9 @@ extension GatewayConnection {
               self.socketGenerationState.admit(socketGeneration)
         else { return }
         self.lastSnapshot = snapshot
-        self.installCanvasPluginSurfaceURL(from: snapshot)
+        if case let .connected(connection) = self.connectionPublication.value {
+            self.installCanvasPluginSurfaceURL(from: snapshot, lease: connection.lease)
+        }
     }
 
     private func handleDisconnect(
@@ -1399,8 +1416,10 @@ extension GatewayConnection {
     private func broadcast(_ push: GatewayPush) {
         if case let .snapshot(snapshot) = push {
             self.lastSnapshot = snapshot
-            if self.canvasPluginSurfaceURL == nil {
-                self.installCanvasPluginSurfaceURL(from: snapshot)
+            if self.canvasPluginSurface == nil,
+               case let .connected(connection) = self.connectionPublication.value
+            {
+                self.installCanvasPluginSurfaceURL(from: snapshot, lease: connection.lease)
             }
         }
         guard let delivery = self.makePushDelivery(push) else { return }
@@ -1592,8 +1611,17 @@ extension GatewayConnection {
         limit: Int? = nil,
         maxChars: Int? = nil,
         timeoutMs: Int? = nil,
-        ifCurrentRoute route: Route? = nil) async throws -> OpenClawChatHistoryPayload
+        ifCurrentRoute route: Route? = nil,
+        ifCurrentServerLease lease: ServerLease? = nil,
+        expectedProfileId: String? = nil) async throws -> OpenClawChatHistoryPayload
     {
+        guard route == nil || lease == nil else { throw OpenClawChatTransportSendError.notDispatched }
+        guard expectedProfileId == nil || lease != nil else {
+            throw OpenClawChatTransportSendError.notDispatched
+        }
+        if let lease, await !(self.isCurrentServerLease(lease)) {
+            throw OpenClawChatTransportSendError.notDispatched
+        }
         let resolvedKey = self.canonicalizeSessionKey(sessionKey)
         let request = OpenClawChatGatewayRequests.history(
             sessionKey: resolvedKey,
@@ -1601,13 +1629,18 @@ extension GatewayConnection {
             limit: limit,
             maxChars: maxChars,
             timeoutMs: timeoutMs)
-        if let route {
-            let data = try await self.request(
+        let data: Data = if let lease {
+            try await self.request(
+                request,
+                ifCurrentServerLease: lease,
+                expectedProfileId: expectedProfileId)
+        } else if let route {
+            try await self.request(
                 request,
                 ifCurrentRoute: route)
-            return try self.decoder.decode(OpenClawChatHistoryPayload.self, from: data)
+        } else {
+            try await self.request(request)
         }
-        let data = try await self.request(request)
         return try self.decoder.decode(OpenClawChatHistoryPayload.self, from: data)
     }
 
@@ -1623,14 +1656,27 @@ extension GatewayConnection {
         runTimeoutMs: Int? = nil,
         requestTimeoutMs: Int = 30000,
         ifCurrentRoute route: Route? = nil,
+        ifCurrentServerLease lease: ServerLease? = nil,
+        expectedProfileId: String? = nil,
         distinguishPreDispatchRouteChange: Bool = false) async throws -> OpenClawChatSendResponse
     {
-        let supportsSettingsCAS = if let route {
-            await self.supportsServerCapability(
+        guard route == nil || lease == nil else { throw OpenClawChatTransportSendError.notDispatched }
+        guard expectedProfileId == nil || lease != nil else {
+            throw OpenClawChatTransportSendError.notDispatched
+        }
+        let supportsSettingsCAS: Bool
+        if let lease {
+            guard let supported = await self.supportsServerCapability(
+                .sessionSettingsCAS,
+                ifCurrentServerLease: lease)
+            else { throw OpenClawChatTransportSendError.notDispatched }
+            supportsSettingsCAS = supported
+        } else if let route {
+            supportsSettingsCAS = await self.supportsServerCapability(
                 .sessionSettingsCAS,
                 ifCurrentRoute: route) == true
         } else {
-            false
+            supportsSettingsCAS = false
         }
         guard expectedSessionSettings == nil || supportsSettingsCAS else {
             throw OpenClawChatTransportSendError.notDispatched
@@ -1649,14 +1695,19 @@ extension GatewayConnection {
             runTimeoutMs: runTimeoutMs,
             requestTimeoutMs: requestTimeoutMs)
 
-        if let route {
-            let data = try await self.request(
+        let data: Data = if let lease {
+            try await self.request(
+                request,
+                ifCurrentServerLease: lease,
+                expectedProfileId: expectedProfileId)
+        } else if let route {
+            try await self.request(
                 request,
                 ifCurrentRoute: route,
                 distinguishPreDispatchRouteChange: distinguishPreDispatchRouteChange)
-            return try self.decoder.decode(OpenClawChatSendResponse.self, from: data)
+        } else {
+            try await self.request(request)
         }
-        let data = try await self.request(request)
         return try self.decoder.decode(OpenClawChatSendResponse.self, from: data)
     }
 }
