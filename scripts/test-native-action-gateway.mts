@@ -113,7 +113,38 @@ type ControlProgress = {
     | "identity"
     | "pending-list"
     | "pending-match"
-    | "approval";
+    | "approval"
+    | "voice-case"
+    | "voice-completion-attempt"
+    | "voice-session-id"
+    | "voice-outcome"
+    | "voice-wire-count"
+    | "voice-wire-result"
+    | "voice-attempt"
+    | "voice-provider-read"
+    | "voice-sentinel-read"
+    | "voice-sentinel-count"
+    | "voice-denied-sentinel-read"
+    | "voice-denied-sentinel-empty"
+    | "voice-provider-count"
+    | "voice-provider-denied"
+    | "voice-store-open"
+    | "voice-store-read"
+    | "voice-store-count"
+    | "voice-store-parse"
+    | "voice-store-record"
+    | "voice-record-found"
+    | "voice-consult-runs"
+    | "voice-transcript-failures"
+    | "voice-history-read"
+    | "voice-transcript-count"
+    | "voice-transcript-denied"
+    | "voice-owner-equality"
+    | "voice-history-equality"
+    | "voice-closed";
+  voiceCase?: VoiceCaseID;
+  method?: (typeof VOICE_METHODS)[number];
+  kind?: "rpc-request" | "rpc-response";
 };
 export type NativeActionFixtureDescriptor = {
   version: 1;
@@ -132,6 +163,12 @@ export type NativeActionFixtureDescriptor = {
   approvals?: ApprovalFixture;
   voice?: Record<VoiceCaseID, VoiceSpec>;
 };
+
+function setControlPhase(progress: ControlProgress | undefined, phase: ControlProgress["phase"]) {
+  if (progress) {
+    progress.phase = phase;
+  }
+}
 
 async function readBody(request: AsyncIterable<Buffer | string>) {
   let text = "";
@@ -250,9 +287,10 @@ export async function withNativeActionGateway(
             { sessionKey, limit: 100 },
           )
         ).messages;
-      const voiceRecords = () => {
+      const voiceRecords = (progress?: ControlProgress) => {
         // Inspect the authoritative fixture-owned store without opening a runtime
         // writer, creating an id, or triggering schema/migration work.
+        setControlPhase(progress, "voice-store-open");
         const db = new DatabaseSync(
           resolveOpenClawAgentSqlitePath({ agentId: "qa", env: instance.env }),
           {
@@ -260,6 +298,7 @@ export async function withNativeActionGateway(
           },
         );
         try {
+          setControlPhase(progress, "voice-store-read");
           const rows = executeSqliteQuerySync(
             db,
             getNodeSqliteKysely<Pick<AgentDatabase, "cache_entries">>(db)
@@ -268,9 +307,12 @@ export async function withNativeActionGateway(
               .where("scope", "=", "talk-client-voice-sessions")
               .limit(16),
           ).rows;
+          setControlPhase(progress, "voice-store-count");
           assert(rows.length < 16, "unexpected native voice record count");
           return rows.map((row) => {
+            setControlPhase(progress, "voice-store-parse");
             const record = parseStoredVoiceSessionRecord(row.value_json);
+            setControlPhase(progress, "voice-store-record");
             assert(record, "invalid native voice owner record");
             return record;
           });
@@ -278,11 +320,19 @@ export async function withNativeActionGateway(
           db.close();
         }
       };
-      const verifyVoiceEffects = async (id: VoiceCaseID) => {
+      const verifyVoiceEffects = async (id: VoiceCaseID, progress?: ControlProgress) => {
         const effects = voiceEffects.get(id)!;
+        setControlPhase(progress, "voice-provider-read");
         const requests = await journal();
-        assert.equal(await fs.readFile(effects.sentinel, "utf8"), effects.marker);
-        assert.equal(await fs.readFile(effects.deniedSentinel, "utf8"), "");
+        setControlPhase(progress, "voice-sentinel-read");
+        const sentinel = await fs.readFile(effects.sentinel, "utf8");
+        setControlPhase(progress, "voice-sentinel-count");
+        assert.equal(sentinel, effects.marker);
+        setControlPhase(progress, "voice-denied-sentinel-read");
+        const deniedSentinel = await fs.readFile(effects.deniedSentinel, "utf8");
+        setControlPhase(progress, "voice-denied-sentinel-empty");
+        assert.equal(deniedSentinel, "");
+        setControlPhase(progress, "voice-provider-count");
         assert.equal(
           requests.filter(
             (request) =>
@@ -292,17 +342,26 @@ export async function withNativeActionGateway(
           ).length,
           1,
         );
+        setControlPhase(progress, "voice-provider-denied");
         assert(!requests.some((request) => request.raw.includes(effects.deniedMarker)));
       };
-      const verifyVoice = async (id: VoiceCaseID) => {
+      const verifyVoice = async (id: VoiceCaseID, progress?: ControlProgress) => {
         const attempt = voiceAttempts.get(id);
+        setControlPhase(progress, "voice-attempt");
         assert(attempt?.baseline && attempt.runId && attempt.voiceSessionId);
-        await verifyVoiceEffects(id);
-        const record = voiceRecords().find((row) => row.voiceSessionId === attempt.voiceSessionId);
+        await verifyVoiceEffects(id, progress);
+        const record = voiceRecords(progress).find(
+          (row) => row.voiceSessionId === attempt.voiceSessionId,
+        );
+        setControlPhase(progress, "voice-record-found");
         assert(record);
+        setControlPhase(progress, "voice-consult-runs");
         assert.deepEqual(record.consultRunIds, [attempt.runId]);
+        setControlPhase(progress, "voice-transcript-failures");
         assert.deepEqual(record.transcriptFailureKeys, []);
+        setControlPhase(progress, "voice-history-read");
         const messages = await history(cases[id].sessionKey);
+        setControlPhase(progress, "voice-transcript-count");
         assert.equal(
           messages.filter(
             (message) =>
@@ -310,23 +369,27 @@ export async function withNativeActionGateway(
           ).length,
           1,
         );
+        setControlPhase(progress, "voice-transcript-denied");
         assert(
           !messages.some((message) =>
             wireMessageText(message).includes(voice[id].deniedTranscript),
           ),
         );
         if (id === "acl" || id === "profile") {
+          setControlPhase(progress, "voice-owner-equality");
           assert.deepEqual(
             record,
             attempt.baseline.record,
             "denied voice request changed its owner",
           );
+          setControlPhase(progress, "voice-history-equality");
           assert.deepEqual(
             messages,
             attempt.baseline.messages,
             "denied voice request changed its transcript",
           );
         } else {
+          setControlPhase(progress, "voice-closed");
           assert.equal(record.status, "closed");
         }
       };
@@ -674,28 +737,39 @@ export async function withNativeActionGateway(
             return { completed: "voice-lifecycle" };
           }
           case "voice-complete": {
+            progress.voiceCase = VOICE_CASES.find((id) => id === input.case);
+            progress.phase = "voice-case";
             assert(VOICE_CASES.includes(input.case as VoiceCaseID));
             const id = input.case as VoiceCaseID;
             const attempt = voiceAttempts.get(id);
+            progress.phase = "voice-completion-attempt";
             assert(attempt?.baseline && !voiceCompleted.has(id));
+            progress.phase = "voice-session-id";
             assert.equal(input.voiceSessionId, attempt.voiceSessionId);
             const allowed = id === "controlACL" || id === "controlProfile";
+            progress.phase = "voice-outcome";
             assert.equal(input.outcome, allowed ? "allowed" : "rejected");
             const events = proxy.snapshot().events.slice(attempt.baseline.eventIndex);
             for (const method of VOICE_METHODS) {
               const expected = !allowed || method === "talk.client.close" ? 1 : 0;
-              for (const kind of ["rpc-request", "rpc-response"]) {
+              for (const kind of ["rpc-request", "rpc-response"] as const) {
+                progress.method = method;
+                progress.kind = kind;
+                progress.phase = "voice-wire-count";
                 const matching = events.filter(
                   (event: { kind: string; method?: string }) =>
                     event.kind === kind && event.method === method,
                 );
                 assert.equal(matching.length, expected);
                 if (kind === "rpc-response") {
+                  progress.phase = "voice-wire-result";
                   assert(matching.every((event: { ok: boolean }) => event.ok === allowed));
                 }
               }
             }
-            await verifyVoice(id);
+            delete progress.method;
+            delete progress.kind;
+            await verifyVoice(id, progress);
             voiceCompleted.add(id);
             return { completed: id };
           }
@@ -785,7 +859,11 @@ export async function withNativeActionGateway(
                 : error instanceof Error
                   ? "error"
                   : "non-error";
-            const message = `native fixture controls failed: action=${progress.action}; phase=${progress.phase}; reason=request-failed; category=${category}`;
+            const message =
+              `native fixture controls failed: action=${progress.action}; phase=${progress.phase}; reason=request-failed; category=${category}` +
+              (progress.voiceCase ? `; voiceCase=${progress.voiceCase}` : "") +
+              (progress.method ? `; method=${progress.method}` : "") +
+              (progress.kind ? `; kind=${progress.kind}` : "");
             // Raw assertions and stacks can contain fixture credentials and private paths.
             firstControlFailure = new Error(message);
             firstControlFailure.stack = message;
