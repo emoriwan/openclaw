@@ -11,7 +11,10 @@ import {
   TINY_PNG_BASE64,
   type MockOpenAiRequestSnapshot,
 } from "../extensions/qa-lab/api.js";
+import { readSessionEntryInstanceId } from "../src/config/sessions/session-accessor.sqlite-entry-identity.js";
+import { readTranscriptEventRows } from "../src/config/sessions/session-accessor.sqlite-read.js";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../src/infra/kysely-sync.js";
+import { runSqliteDeferredTransactionSync } from "../src/infra/sqlite-transaction.js";
 import type { DB as AgentDatabase } from "../src/state/openclaw-agent-db.generated.js";
 import { resolveOpenClawAgentSqlitePath } from "../src/state/openclaw-agent-db.paths.js";
 import {
@@ -256,7 +259,7 @@ export async function withNativeActionGateway(
           baseline?: {
             eventIndex: number;
             record: ClientVoiceSessionRecord;
-            messages: Array<{ role?: string; content?: unknown }>;
+            transcript: ReturnType<typeof voiceTranscriptSnapshot>;
           };
         }
       >();
@@ -287,6 +290,26 @@ export async function withNativeActionGateway(
             { sessionKey, limit: 100 },
           )
         ).messages;
+      const voiceTranscriptSnapshot = (sessionKey: string) => {
+        const agentId = "qa";
+        const db = new DatabaseSync(
+          resolveOpenClawAgentSqlitePath({ agentId, env: instance.env }),
+          { readOnly: true },
+        );
+        try {
+          // Profile merges refresh display metadata without rewriting transcript
+          // events. Compare the complete stored identity and bytes in one snapshot.
+          return runSqliteDeferredTransactionSync(db, () => {
+            const sessionId = readSessionEntryInstanceId({ db }, sessionKey);
+            assert(sessionId, "native voice transcript session was missing");
+            const rows = readTranscriptEventRows({ db }, sessionId);
+            assert(rows.length > 0, "native voice transcript was empty");
+            return { agentId, sessionKey, sessionId, rows };
+          });
+        } finally {
+          db.close();
+        }
+      };
       const voiceRecords = (progress?: ControlProgress) => {
         // Inspect the authoritative fixture-owned store without opening a runtime
         // writer, creating an id, or triggering schema/migration work.
@@ -384,8 +407,8 @@ export async function withNativeActionGateway(
           );
           setControlPhase(progress, "voice-history-equality");
           assert.deepEqual(
-            messages,
-            attempt.baseline.messages,
+            voiceTranscriptSnapshot(cases[id].sessionKey),
+            attempt.baseline.transcript,
             "denied voice request changed its transcript",
           );
         } else {
@@ -713,7 +736,7 @@ export async function withNativeActionGateway(
             attempt.baseline = {
               eventIndex: events.length,
               record,
-              messages: await history(cases[id].sessionKey),
+              transcript: voiceTranscriptSnapshot(cases[id].sessionKey),
             };
             return { completed: "voice-baseline" };
           }
