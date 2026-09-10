@@ -1411,6 +1411,13 @@ final class NodeAppModel {
         else {
             throw OpenClawNativeActionError(self.talkMode.statusText)
         }
+        self.talkMode.registerNativeStartWaiter(startup)
+        var failureReason: String?
+        defer {
+            if self.talkMode.releaseNativeStartWaiter(startup) {
+                self.settleNativeTalkFailure(callID: startup.callID, reason: failureReason)
+            }
+        }
         do {
             let outcome = await startup.result.value
             try self.talkMode.requireCurrentNativeStart(startup)
@@ -1434,11 +1441,7 @@ final class NodeAppModel {
             } else {
                 error
             }
-            if self.talkMode.ownsUnsettledNativeCall(startup) {
-                self.settleNativeTalkFailure(
-                    callID: startup.callID,
-                    reason: failure is CancellationError ? nil : failure.localizedDescription)
-            }
+            failureReason = failure is CancellationError ? nil : failure.localizedDescription
             throw failure
         }
     }

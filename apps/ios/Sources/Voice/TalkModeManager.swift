@@ -251,6 +251,7 @@ final class TalkModeManager: NSObject {
         var failureReason: String?
         var readyAttemptID: Int?
         var startupSettled = false
+        var startupWaiterCount = 0
 
         init(binding: IOSNativeActionBinding) {
             self.binding = binding
@@ -279,6 +280,17 @@ final class TalkModeManager: NSObject {
 
     func ownsUnsettledNativeCall(_ attempt: StartAttempt) -> Bool {
         self.nativeCall === attempt.call && !attempt.call.startupSettled
+    }
+
+    func registerNativeStartWaiter(_ attempt: StartAttempt) {
+        attempt.call.startupWaiterCount += 1
+    }
+
+    func releaseNativeStartWaiter(_ attempt: StartAttempt) -> Bool {
+        // Attempts rotate within one call. A retiring waiter must not stop a
+        // current attempt while another Node invocation still owns startup.
+        attempt.call.startupWaiterCount -= 1
+        return attempt.call.startupWaiterCount == 0 && self.ownsUnsettledNativeCall(attempt)
     }
 
     func requireCurrentNativeStart(_ attempt: StartAttempt) throws {
