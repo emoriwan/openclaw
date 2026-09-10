@@ -142,58 +142,63 @@ struct NativeActionGatewayWireTests {
         try #require(descriptor.version == 1)
         let control = MacNativeWireControl(descriptor: descriptor)
         defer { control.close() }
-        let configuration: [String: Any] = [
-            "gateway": [
-                "mode": "remote",
-                "remote": ["transport": "direct", "url": descriptor.gatewayURL.absoluteString],
-            ],
-        ]
-        // macOS derives its primary Gateway owner from the configured endpoint.
-        // The fixture's gatewayID is an iOS selection ID, not a Gateway-issued identity to compare.
-        let gatewayID = try #require(GatewayDiscoveryPreferences.deviceAuthGatewayID(root: configuration))
-        // Use the production initializer: the test-only endpoint initializer omits device identity.
-        let connection = GatewayConnection(
-            endpointProvider: {
-                .init(
-                    config: (descriptor.gatewayURL, nil, nil),
-                    routeAuthority: nil,
-                    deviceAuthGatewayID: gatewayID)
-            },
-            supportsSharedEndpointRecovery: false)
         let configPath = TestIsolation.tempConfigPath()
         defer { try? FileManager.default.removeItem(atPath: configPath) }
-        do {
-            try await withIsolatedWebChatManager(
-                primaryConnection: connection,
-                env: ["OPENCLAW_CONFIG_PATH": configPath])
-            { manager in
+        try await TestIsolation.withIsolatedState(env: ["OPENCLAW_CONFIG_PATH": configPath]) {
+            func selectGateway(_ url: URL) throws -> String {
+                let configuration: [String: Any] = [
+                    "gateway": [
+                        "mode": "remote",
+                        "remote": ["transport": "direct", "url": url.absoluteString],
+                    ],
+                ]
                 try JSONSerialization.data(withJSONObject: configuration)
                     .write(to: URL(fileURLWithPath: configPath))
-                do {
-                    _ = try await connection.acquireServerLease()
-                    throw OpenClawNativeActionError("An unpaired native device was admitted.")
-                } catch let error as GatewayConnectAuthError {
-                    try #require(error.detailCodeRaw == GatewayConnectAuthDetailCode.pairingRequired.rawValue)
-                }
-                let pairing = try await control.request("pair")
-                try #require(pairing.paired == true)
-                _ = try await connection.acquireServerLease()
-                let hello = try #require(await connection.lastSnapshot)
-                let scopeValues = try #require(hello.auth["scopes"]?.arrayValue)
-                let scopes = scopeValues.compactMap(\.stringValue)
-                try #require(Set(scopes) == ["operator.read", "operator.write"])
-                try #require(!scopes.contains("operator.admin"))
-
-                let router = NativeActionRouter(windows: manager, launchPlan: .init(arguments: ["OpenClaw"]))
-                try await self.exercise(
-                    control: control, gatewayID: gatewayID, manager: manager, router: router)
-                try await self.exerciseApprovals(control: control, gatewayID: gatewayID)
+                // macOS derives its primary Gateway owner from the configured endpoint.
+                // The fixture's gatewayID is an iOS selection ID, not a Gateway-issued identity to compare.
+                return try #require(GatewayDiscoveryPreferences.deviceAuthGatewayID(root: configuration))
             }
-        } catch {
+            let gatewayID = try selectGateway(descriptor.gatewayURL)
+            // Use the production initializer: the test-only endpoint initializer omits device identity.
+            let connection = GatewayConnection(
+                endpointProvider: {
+                    .init(
+                        config: (descriptor.gatewayURL, nil, nil),
+                        routeAuthority: nil,
+                        deviceAuthGatewayID: gatewayID)
+                },
+                supportsSharedEndpointRecovery: false)
+            do {
+                try await withWebChatManagerLifetime(primaryConnection: connection) { manager in
+                    do {
+                        _ = try await connection.acquireServerLease()
+                        throw OpenClawNativeActionError("An unpaired native device was admitted.")
+                    } catch let error as GatewayConnectAuthError {
+                        try #require(error.detailCodeRaw == GatewayConnectAuthDetailCode.pairingRequired.rawValue)
+                    }
+                    let pairing = try await control.request("pair")
+                    try #require(pairing.paired == true)
+                    _ = try await connection.acquireServerLease()
+                    let hello = try #require(await connection.lastSnapshot)
+                    let scopeValues = try #require(hello.auth["scopes"]?.arrayValue)
+                    let scopes = scopeValues.compactMap(\.stringValue)
+                    try #require(Set(scopes) == ["operator.read", "operator.write"])
+                    try #require(!scopes.contains("operator.admin"))
+
+                    let router = NativeActionRouter(windows: manager, launchPlan: .init(arguments: ["OpenClaw"]))
+                    try await self.exercise(
+                        control: control, gatewayID: gatewayID, manager: manager, router: router)
+                }
+                // Retire the writer's windows before changing the selected endpoint.
+                // Keep one state directory so only credential ownership, not device identity, changes.
+                let approvalGatewayID = try selectGateway(descriptor.approvals.gatewayURL)
+                try await self.exerciseApprovals(control: control, gatewayID: approvalGatewayID)
+            } catch {
+                await connection.shutdown()
+                throw error
+            }
             await connection.shutdown()
-            throw error
         }
-        await connection.shutdown()
     }
 
     private func exercise(
@@ -420,7 +425,7 @@ struct NativeActionGatewayWireTests {
                         "id": AnyCodable(spec.id), "command": AnyCodable(spec.command),
                         "agentId": AnyCodable("qa"), "sessionKey": AnyCodable(spec.sessionKey),
                         "host": AnyCodable("gateway"), "ask": AnyCodable("always"),
-                        "twoPhase": AnyCodable(true), "timeoutMs": AnyCodable(120000),
+                        "twoPhase": AnyCodable(true), "timeoutMs": AnyCodable(120_000),
                     ],
                     timeoutMs: 15000,
                     ifCurrentServerLease: lease,
@@ -537,7 +542,7 @@ struct NativeActionGatewayWireTests {
             element.accessibilityRole?() == .button &&
                 element.isAccessibilityEnabled?() == true &&
                 [element.accessibilityLabel?(), element.accessibilityTitle?()]
-                    .compactMap(\.self).contains(title)
+                .compactMap(\.self).contains(title)
         }
         try #require(buttons.count == 1)
         let button = try #require(buttons.first)
