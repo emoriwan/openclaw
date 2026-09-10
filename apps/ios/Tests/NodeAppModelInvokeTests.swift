@@ -581,6 +581,94 @@ private func makeTalkModel() -> (TalkModeManager, NodeAppModel) {
 }
 
 @MainActor
+private func connectNativeTalkCleanupGateway(
+    _ gateway: GatewayNodeSession,
+    publications: AsyncStream<(Bool, EventFrame)>.Continuation,
+    cleanup: TalkPreparationBarrier,
+    closed: AsyncStream<Void>.Continuation) async throws -> IOSNativeActionBinding
+{
+    let socket = GatewayTestWebSocketTask(sendHook: { socket, message, _ in
+        let data: Data = switch message {
+        case let .data(value): value
+        case let .string(value): Data(value.utf8)
+        @unknown default: Data()
+        }
+        let frame = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        try #require(frame["type"] as? String == "req")
+        let method = try #require(frame["method"] as? String)
+        if method == "connect" { return }
+        let requestID = try #require(frame["id"] as? String)
+        let params = try #require(frame["params"] as? [String: Any])
+        let payload: [String: Any]
+        switch method {
+        case "users.self":
+            #expect(frame["expectedProfileId"] as? String == "profile-a")
+            payload = ["profile": ["id": "profile-a"]]
+        case "talk.config":
+            #expect(frame["expectedProfileId"] as? String == "profile-a")
+            #expect(params["includeSecrets"] as? Bool == true)
+            payload = ["config": ["talk": ["resolved": [
+                "provider": "google", "config": [String: Any](),
+            ]]]]
+        case "talk.client.close":
+            #expect(frame["expectedProfileId"] as? String == "profile-a")
+            #expect(params["voiceSessionId"] as? String == "voice-a")
+            #expect(params["sessionKey"] as? String == "agent:main:main")
+            await cleanup.suspendFirstPreparation()
+            payload = [:]
+        case "talk.mode":
+            let enabled = try #require(params["enabled"] as? Bool)
+            payload = ["enabled": enabled, "phase": params["phase"] ?? NSNull(), "ts": 0]
+            publications.yield((enabled, EventFrame(
+                type: "event",
+                event: "talk.mode",
+                payload: AnyCodable(payload),
+                seq: nil,
+                stateversion: nil)))
+        default:
+            Issue.record("Unexpected native cleanup fixture method: \(method)")
+            try socket.emitReceiveSuccess(.data(JSONSerialization.data(withJSONObject: [
+                "type": "res", "id": requestID, "ok": false,
+                "error": ["code": "UNAVAILABLE", "message": "Unexpected fixture method"],
+            ])))
+            return
+        }
+        try socket.emitReceiveSuccess(.data(JSONSerialization.data(withJSONObject: [
+            "type": "res", "id": requestID, "ok": true, "payload": payload,
+        ])))
+        if method == "talk.client.close" { closed.yield(()) }
+    }, receiveHook: { socket, index in
+        if index == 0 { return .data(GatewayWebSocketTestSupport.connectChallengeData()) }
+        let data = GatewayWebSocketTestSupport.connectOkData(
+            id: socket.snapshotConnectRequestID() ?? "connect",
+            capabilities: [GatewayServerCapability.profileBinding.rawValue])
+        var frame = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var payload = try #require(frame["payload"] as? [String: Any])
+        payload["auth"] = ["role": "operator", "scopes": ["operator.read", "operator.write", "operator.talk.secrets"]]
+        frame["payload"] = payload
+        return try .data(JSONSerialization.data(withJSONObject: frame))
+    })
+    var options = GatewayWebSocketTestSupport.identityFreeOperatorConnectOptions
+    options.deviceAuthGatewayID = "native-talk-cleanup"
+    options.allowStoredDeviceAuth = false
+    try await gateway.connect(
+        url: #require(URL(string: "ws://native-talk-cleanup.invalid")),
+        credentials: .init(),
+        connectOptions: options,
+        sessionBox: WebSocketSessionBox(session: GatewayTestWebSocketSession(taskFactory: { socket })),
+        onConnected: {},
+        onDisconnected: { _ in },
+        onInvoke: { BridgeInvokeResponse(id: $0.id, ok: true) })
+    return try IOSNativeActionBinding(
+        session: .init(
+            owner: .init(gatewayID: "native-talk-cleanup", profileID: "profile-a"),
+            agentID: "main",
+            sessionKey: "agent:main:main"),
+        gateway: gateway,
+        route: #require(await gateway.currentRoute()))
+}
+
+@MainActor
 private func makeNodeModelWithMockServices() -> NodeAppModel {
     NodeAppModel(
         notificationCenter: MockBootstrapNotificationCenter(),
@@ -4166,6 +4254,299 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
 
         #expect(!talkMode.isListening)
         #expect(talkMode.statusText == "Offline")
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func `native Talk reservation joins and settles only its captured startup owner`(
+        restartSameCall: Bool) async throws
+    {
+        let gateway = GatewayNodeSession()
+        let socket = GatewayTestWebSocketTask(sendHook: { _, message, _ in
+            let data: Data = switch message {
+            case let .data(value): value
+            case let .string(value): Data(value.utf8)
+            @unknown default: Data()
+            }
+            let frame = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            #expect(frame["method"] as? String == "connect")
+        }, receiveHook: { socket, index in
+            if index == 0 { return .data(GatewayWebSocketTestSupport.connectChallengeData()) }
+            return .data(GatewayWebSocketTestSupport.connectOkData(
+                id: socket.snapshotConnectRequestID() ?? "connect",
+                capabilities: [GatewayServerCapability.profileBinding.rawValue]))
+        })
+        var options = GatewayWebSocketTestSupport.identityFreeOperatorConnectOptions
+        options.deviceAuthGatewayID = "native-talk-fixture"
+        options.allowStoredDeviceAuth = false
+        let talk = TalkModeManager(allowSimulatorCapture: true)
+        let firstBarrier = TalkPreparationBarrier()
+        let secondBarrier = TalkPreparationBarrier()
+        var admittedStarts: [TalkModeManager.StartAttempt] = []
+        var terminalCalls: [UUID] = []
+        talk.setNativeCallFailureHandler { callID, _ in terminalCalls.append(callID) }
+        defer {
+            talk.stop()
+            talk._test_setStartEntryHandler(nil)
+            talk.setNativeCallFailureHandler(nil)
+            firstBarrier.release()
+            secondBarrier.release()
+        }
+        do {
+            try await gateway.connect(
+                url: #require(URL(string: "ws://native-talk-test.invalid")),
+                credentials: .init(),
+                connectOptions: options,
+                sessionBox: WebSocketSessionBox(session: GatewayTestWebSocketSession(taskFactory: { socket })),
+                onConnected: {},
+                onDisconnected: { _ in },
+                onInvoke: { BridgeInvokeResponse(id: $0.id, ok: true) })
+            let binding = try IOSNativeActionBinding(
+                session: .init(
+                    owner: .init(gatewayID: "native-talk-fixture", profileID: "profile-a"),
+                    agentID: "main",
+                    sessionKey: "agent:main:main"),
+                gateway: gateway,
+                route: #require(await gateway.currentRoute()))
+            talk.attachGateway(gateway)
+            talk.updateGatewayConnected(true)
+            talk.suspendForBackground()
+            let refusedStatus = talk.statusText
+            #expect(talk.setEnabled(true, nativeBinding: binding) == nil)
+            #expect(talk.statusText == refusedStatus)
+            #expect(!talk.isEnabled)
+            talk.resumeAfterBackground()
+
+            var entries = 0
+            talk._test_setStartEntryHandler {
+                entries += 1
+                await firstBarrier.suspendFirstPreparation()
+            }
+            let first = try #require(talk.setEnabled(true, nativeBinding: binding))
+            admittedStarts.append(first)
+            await firstBarrier.waitUntilEntered()
+            let joined = try #require(talk.setEnabled(true, nativeBinding: binding))
+            #expect(talk.ownsStartAttempt(joined))
+            #expect(talk.ownsUnsettledNativeCall(joined))
+            #expect(entries == 1)
+            for attempt in [first, joined] {
+                #expect(throws: OpenClawNativeActionError.self) { try talk.commitNativeStart(attempt) }
+            }
+
+            talk._test_setStartEntryHandler { await secondBarrier.suspendFirstPreparation() }
+            if restartSameCall {
+                talk.suspendForBackground()
+                talk.resumeAfterBackground()
+                await secondBarrier.waitUntilEntered()
+            } else {
+                talk.stop()
+            }
+            let successor = try #require(talk.setEnabled(true, nativeBinding: binding))
+            admittedStarts.append(successor)
+            await secondBarrier.waitUntilEntered()
+            let successorStatus = talk.statusText
+            firstBarrier.release()
+            guard case .cancelled = await first.result.value else {
+                Issue.record("The retired startup must cancel")
+                talk.stop()
+                secondBarrier.release()
+                _ = await successor.result.value
+                await gateway.disconnect()
+                return
+            }
+            #expect(!talk.ownsStartAttempt(first))
+            #expect(!talk.ownsStartAttempt(joined))
+            #expect(talk.ownsUnsettledNativeCall(first) == restartSameCall)
+            #expect((first.callID == successor.callID) == restartSameCall)
+            #expect(talk.ownsStartAttempt(successor))
+            #expect(talk.isEnabled)
+            #expect(talk.statusText == successorStatus)
+
+            talk.updateGatewayConnected(false)
+            secondBarrier.release()
+            guard case .unavailable = await successor.result.value else {
+                Issue.record("Lost native ownership must be unavailable, not a successful microphone start")
+                await gateway.disconnect()
+                return
+            }
+            #expect(talk.ownsStartAttempt(successor))
+            #expect(!talk.isEnabled)
+            #expect(!talk.isListening)
+            #expect(talk.statusText == IOSNativeActionBinding.unavailableReason)
+            #expect(terminalCalls.isEmpty)
+            #expect(talk.ownsUnsettledNativeCall(successor))
+            #expect(successor.failureReason == IOSNativeActionBinding.unavailableReason)
+            if restartSameCall {
+                #expect(first.failureReason == IOSNativeActionBinding.unavailableReason)
+                #expect(throws: OpenClawNativeActionError.self) { try talk.requireCurrentNativeStart(first) }
+            }
+            #expect(throws: OpenClawNativeActionError.self) { try talk.commitNativeStart(successor) }
+
+            talk.stop()
+            talk.updateGatewayConnected(true)
+            let fresh = try #require(talk.setEnabled(true, nativeBinding: binding))
+            admittedStarts.append(fresh)
+            #expect(!talk.ownsUnsettledNativeCall(first))
+            #expect(!talk.ownsNativeCall(successor.callID))
+            #expect(talk.ownsNativeCall(fresh.callID))
+            talk.stop()
+            _ = await fresh.result.value
+        } catch {
+            talk.stop()
+            firstBarrier.release()
+            secondBarrier.release()
+            for start in admittedStarts {
+                _ = await start.result.value
+            }
+            await gateway.disconnect()
+            throw error
+        }
+        await gateway.disconnect()
+    }
+
+    @Test(arguments: [false, true])
+    @MainActor func `retired native cleanup does not publish a global stop for its successor`(
+        incomingGlobalStop: Bool) async throws
+    {
+        let keys = ["talk.enabled", VoiceWakePreferences.enabledKey]
+        let previousValues = keys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
+        for key in keys {
+            UserDefaults.standard.set(false, forKey: key)
+        }
+        let talk = TalkModeManager(allowSimulatorCapture: true)
+        let appModel = NodeAppModel(talkMode: talk)
+        let gateway = appModel.operatorSession
+        let firstStart = TalkPreparationBarrier()
+        let secondStart = TalkPreparationBarrier()
+        let cleanup = TalkPreparationBarrier()
+        let (publications, publicationSink) = AsyncStream<(Bool, EventFrame)>.makeStream(
+            bufferingPolicy: .bufferingNewest(32))
+        let (closed, closeSink) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
+        var modes: [Bool] = []
+        var delayedEvents: [EventFrame] = []
+        var replayEnabled = false
+        let replay = Task { @MainActor in
+            for await (enabled, event) in publications {
+                modes.append(enabled)
+                if replayEnabled {
+                    await appModel.handleOperatorGatewayServerEvent(event)
+                } else {
+                    delayedEvents.append(event)
+                }
+            }
+        }
+        var starts: [Task<Void, Error>] = []
+        var cleanupIssued = false
+        var cleanupFinished = false
+        var closedIterator = closed.makeAsyncIterator()
+        defer {
+            talk._test_setStartEntryHandler(nil)
+            talk.resumeAfterBackground()
+            appModel.voiceWake.stop()
+            for (key, previous) in previousValues {
+                if let previous {
+                    UserDefaults.standard.set(previous, forKey: key)
+                } else {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+            }
+        }
+        let result: Result<Void, Error>
+        do {
+            let binding = try await connectNativeTalkCleanupGateway(
+                gateway, publications: publicationSink, cleanup: cleanup, closed: closeSink)
+            appModel.setOperatorConnected(true)
+            talk.attachGateway(gateway)
+            talk.updateGatewayConnected(true)
+            talk._test_setStartEntryHandler { await firstStart.suspendFirstPreparation() }
+            let first = Task { @MainActor in
+                try await appModel.startNativeTalk(nativeBinding: binding, presentationIsCurrent: { true })
+            }
+            starts.append(first)
+            await firstStart.waitUntilEntered()
+            #expect(UserDefaults.standard.bool(forKey: "talk.enabled"))
+            #if targetEnvironment(simulator)
+            appModel.setVoiceWakeEnabled(true)
+            await appModel.voiceWake._test_waitForScheduledStart()
+            #expect(appModel.voiceWake.statusText == "Paused")
+            #endif
+            // Seed only the existing logical cleanup fixture, never microphone readiness.
+            talk._test_preparePrefetchedRealtimeVoiceSession("voice-a")
+            cleanupIssued = true
+            talk.suspendForBackground()
+            firstStart.release()
+            do {
+                try await first.value
+                Issue.record("The suspended native Node startup must cancel")
+            } catch is CancellationError {}
+            #expect(!talk.isEnabled)
+            #expect(talk.activeNativeBinding == nil)
+            #expect(!UserDefaults.standard.bool(forKey: "talk.enabled"))
+            #if targetEnvironment(simulator)
+            await appModel.voiceWake._test_waitForScheduledStart()
+            #expect(appModel.voiceWake.isEnabled)
+            #expect(UserDefaults.standard.bool(forKey: VoiceWakePreferences.enabledKey))
+            #expect(appModel.voiceWake.statusText == "Voice Wake isn’t supported on Simulator")
+            #endif
+            #expect(modes.isEmpty)
+            await cleanup.waitUntilEntered()
+            talk.resumeAfterBackground()
+            talk._test_setStartEntryHandler { await secondStart.suspendFirstPreparation() }
+            starts.append(Task { @MainActor in
+                try await appModel.startNativeTalk(nativeBinding: binding, presentationIsCurrent: { true })
+            })
+            await secondStart.waitUntilEntered()
+            let successor = try #require(talk.setEnabled(true, nativeBinding: binding))
+            cleanup.release()
+            _ = await closedIterator.next()
+            cleanupFinished = true
+            replayEnabled = true
+            let capturedEvents = delayedEvents
+            delayedEvents.removeAll()
+            for event in capturedEvents {
+                await appModel.handleOperatorGatewayServerEvent(event)
+            }
+            try #require(talk.ownsNativeCall(successor.callID))
+            #expect(talk.isEnabled)
+            #expect(UserDefaults.standard.bool(forKey: "talk.enabled"))
+
+            // A real ordinary publication also marks progress through the Node producer.
+            appModel.setTalkEnabled(true)
+            try #require(await waitForMainActorWork { modes.contains(true) })
+            #expect(modes == [true])
+            try #require(talk.ownsNativeCall(successor.callID))
+            if incomingGlobalStop {
+                await appModel.handleOperatorGatewayServerEvent(EventFrame(
+                    type: "event",
+                    event: "talk.mode",
+                    payload: AnyCodable(["enabled": false, "phase": "disabled", "ts": 1]),
+                    seq: nil,
+                    stateversion: nil))
+            } else {
+                appModel.setTalkEnabled(false)
+            }
+            try #require(await waitForMainActorWork { modes.contains(false) })
+            #expect(modes == [true, false])
+            #expect(!talk.isEnabled)
+            #expect(!talk.ownsNativeCall(successor.callID))
+            #expect(!UserDefaults.standard.bool(forKey: "talk.enabled"))
+            result = .success(())
+        } catch {
+            result = .failure(error)
+        }
+        appModel.setOperatorConnected(false)
+        talk.stop()
+        firstStart.release()
+        secondStart.release()
+        cleanup.release()
+        if cleanupIssued, !cleanupFinished { _ = await closedIterator.next() }
+        for start in starts {
+            _ = await start.result
+        }
+        publicationSink.finish()
+        closeSink.finish()
+        await replay.value
+        await gateway.disconnect()
+        try result.get()
     }
 
     @Test @MainActor func `gateway disconnect cancels manual PTT and releases its lease`() async throws {
