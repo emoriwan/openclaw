@@ -632,68 +632,6 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
             distinguishPreDispatchRouteChange: true)
     }
 
-    func acquireOutboxRouteLease() async -> OpenClawChatTransportRouteLeaseResult {
-        guard let lease = await self.captureChatServerLease() else { return .unavailable(reason: nil) }
-        return await self.acquireOutboxRouteLease(ifCurrentServerLease: lease)
-    }
-
-    func acquireOutboxRouteLease(
-        ifCurrentServerLease lease: GatewayConnection.ServerLease) async -> OpenClawChatTransportRouteLeaseResult
-    {
-        guard self.outboxGatewayID != nil || self.nativeBinding != nil,
-              self.nativeBinding == nil || (self.nativeBindingIsCurrent && self.nativeBinding?.lease == lease),
-              await self.currentOutboxGatewayMatchesConnection(),
-              await self.connection.isCurrentServerLease(lease)
-        else { return .unavailable(reason: nil) }
-        guard let supportsRoutingContract = await connection.supportsServerCapability(
-            .chatSendRoutingContract,
-            ifCurrentServerLease: lease)
-        else { return .unavailable(reason: nil) }
-        guard supportsRoutingContract else {
-            return .unavailable(
-                reason: OpenClawChatTransportUpgradeMessage.routingContract,
-                allowsLiveSend: true)
-        }
-        let supportsSettingsCAS = await connection.supportsServerCapability(
-            .sessionSettingsCAS,
-            ifCurrentServerLease: lease) == true
-        let roster = OpenClawChatGatewayRequests.agentsList()
-        guard let data = try? await self.requestChatGateway(roster, ifCurrentServerLease: lease),
-              let routingIdentity = try? OpenClawChatGatewayPayloadCodec.decodeSessionRoutingIdentity(data)
-        else { return .unavailable(reason: nil) }
-        let routingContract = routingIdentity.contract
-        return .available(OpenClawChatTransportRouteLease(
-            sendTargetedMessageWithSettings: { sessionKey, agentID, settings, message, thinking, id, attachments in
-                try await self.requireCurrentOutboxGateway()
-                return try await self.withNativeRouteValidation {
-                    try await self.connection.chatSend(
-                        sessionKey: sessionKey,
-                        agentID: agentID,
-                        expectedSessionRoutingContract: routingContract,
-                        expectedSessionSettings: settings,
-                        message: message,
-                        thinking: thinking,
-                        idempotencyKey: id,
-                        attachments: attachments,
-                        ifCurrentServerLease: lease,
-                        expectedProfileId: self.nativeBinding?.owner.profileID,
-                        completionPolicy: self.nativeBinding == nil ? .requireCurrentRoute : .preserveChatSendSuccess)
-                }
-            },
-            requestTargetedHistory: { sessionKey, agentID in
-                try await self.requireCurrentOutboxGateway()
-                return try await self.withNativeRouteValidation {
-                    try await self.connection.chatHistory(
-                        sessionKey: sessionKey,
-                        agentID: agentID,
-                        ifCurrentServerLease: lease,
-                        expectedProfileId: self.nativeBinding?.owner.profileID)
-                }
-            },
-            sessionRoutingContract: routingContract,
-            supportsSessionSettingsCAS: supportsSettingsCAS))
-    }
-
     func synthesizeSpeech(text: String) async throws -> OpenClawChatSpeechClip {
         // Capture the lease before validating the pinned gateway: a gateway
         // switch after validation then fails the request via the lease guard
@@ -911,6 +849,117 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
         case .seqGap:
             return .seqGap
         }
+    }
+}
+
+extension MacGatewayChatTransport {
+    func acquireOutboxRouteLease() async -> OpenClawChatTransportRouteLeaseResult {
+        // Native actions cannot reuse authority from a replacement socket.
+        if self.nativeBinding != nil {
+            guard let lease = await self.captureChatServerLease() else { return .unavailable(reason: nil) }
+            return await self.acquireOutboxRouteLease(ifCurrentServerLease: lease)
+        }
+        guard self.outboxGatewayID != nil,
+              await self.currentOutboxGatewayMatchesConnection()
+        else { return .unavailable(reason: nil) }
+        guard let route = await connection.captureRoute() else { return .unavailable(reason: nil) }
+        guard let supportsRoutingContract = await connection.supportsServerCapability(
+            .chatSendRoutingContract,
+            ifCurrentRoute: route)
+        else { return .unavailable(reason: nil) }
+        guard supportsRoutingContract else {
+            return .unavailable(
+                reason: OpenClawChatTransportUpgradeMessage.routingContract,
+                allowsLiveSend: true)
+        }
+        let supportsSettingsCAS = await connection.supportsServerCapability(
+            .sessionSettingsCAS,
+            ifCurrentRoute: route) == true
+        guard let routingIdentity = try? await connection.sessionRoutingIdentity(
+            ifCurrentRoute: route)
+        else { return .unavailable(reason: nil) }
+        let routingContract = routingIdentity.contract
+        return .available(OpenClawChatTransportRouteLease(
+            sendTargetedMessageWithSettings: { sessionKey, agentID, settings, message, thinking, id, attachments in
+                try await self.requireCurrentOutboxGateway()
+                return try await self.connection.chatSend(
+                    sessionKey: sessionKey,
+                    agentID: agentID,
+                    expectedSessionRoutingContract: routingContract,
+                    expectedSessionSettings: settings,
+                    message: message,
+                    thinking: thinking,
+                    idempotencyKey: id,
+                    attachments: attachments,
+                    ifCurrentRoute: route,
+                    distinguishPreDispatchRouteChange: true)
+            },
+            requestTargetedHistory: { sessionKey, agentID in
+                try await self.requireCurrentOutboxGateway()
+                return try await self.connection.chatHistory(
+                    sessionKey: sessionKey,
+                    agentID: agentID,
+                    ifCurrentRoute: route)
+            },
+            sessionRoutingContract: routingContract,
+            supportsSessionSettingsCAS: supportsSettingsCAS))
+    }
+
+    func acquireOutboxRouteLease(
+        ifCurrentServerLease lease: GatewayConnection.ServerLease) async -> OpenClawChatTransportRouteLeaseResult
+    {
+        guard self.outboxGatewayID != nil || self.nativeBinding != nil,
+              self.nativeBinding == nil || (self.nativeBindingIsCurrent && self.nativeBinding?.lease == lease),
+              await self.currentOutboxGatewayMatchesConnection(),
+              await self.connection.isCurrentServerLease(lease)
+        else { return .unavailable(reason: nil) }
+        guard let supportsRoutingContract = await connection.supportsServerCapability(
+            .chatSendRoutingContract,
+            ifCurrentServerLease: lease)
+        else { return .unavailable(reason: nil) }
+        guard supportsRoutingContract else {
+            return .unavailable(
+                reason: OpenClawChatTransportUpgradeMessage.routingContract,
+                allowsLiveSend: true)
+        }
+        let supportsSettingsCAS = await connection.supportsServerCapability(
+            .sessionSettingsCAS,
+            ifCurrentServerLease: lease) == true
+        let roster = OpenClawChatGatewayRequests.agentsList()
+        guard let data = try? await self.requestChatGateway(roster, ifCurrentServerLease: lease),
+              let routingIdentity = try? OpenClawChatGatewayPayloadCodec.decodeSessionRoutingIdentity(data)
+        else { return .unavailable(reason: nil) }
+        let routingContract = routingIdentity.contract
+        return .available(OpenClawChatTransportRouteLease(
+            sendTargetedMessageWithSettings: { sessionKey, agentID, settings, message, thinking, id, attachments in
+                try await self.requireCurrentOutboxGateway()
+                return try await self.withNativeRouteValidation {
+                    try await self.connection.chatSend(
+                        sessionKey: sessionKey,
+                        agentID: agentID,
+                        expectedSessionRoutingContract: routingContract,
+                        expectedSessionSettings: settings,
+                        message: message,
+                        thinking: thinking,
+                        idempotencyKey: id,
+                        attachments: attachments,
+                        ifCurrentServerLease: lease,
+                        expectedProfileId: self.nativeBinding?.owner.profileID,
+                        completionPolicy: self.nativeBinding == nil ? .requireCurrentRoute : .preserveChatSendSuccess)
+                }
+            },
+            requestTargetedHistory: { sessionKey, agentID in
+                try await self.requireCurrentOutboxGateway()
+                return try await self.withNativeRouteValidation {
+                    try await self.connection.chatHistory(
+                        sessionKey: sessionKey,
+                        agentID: agentID,
+                        ifCurrentServerLease: lease,
+                        expectedProfileId: self.nativeBinding?.owner.profileID)
+                }
+            },
+            sessionRoutingContract: routingContract,
+            supportsSessionSettingsCAS: supportsSettingsCAS))
     }
 }
 
