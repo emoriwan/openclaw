@@ -342,7 +342,12 @@ struct NativeActionRouterTests {
             ])
             if historyOwner == "other-session" {
                 await #expect(throws: OpenClawNativeActionError.self) { _ = try await router.inspect(run) }
-                #expect(manager.approvalContext(connection: fixture.gateway) == nil)
+                let context = try #require(manager.approvalContext(connection: fixture.gateway))
+                #expect(context.sessionKey == nil)
+                #expect(context.agentID == nil)
+                #expect(context.windowID == nil)
+                #expect(context.nativeBinding == nil)
+                #expect(!manager._testSessionObserverVisible(connection: fixture.gateway))
             } else {
                 let inspection = try await router.inspect(run)
                 #expect(inspection.run == run)
@@ -400,10 +405,10 @@ struct NativeActionRouterTests {
 
     @Test func `native open preserves an already warm ordinary window and its draft`() async throws {
         try await self.withFixture { fixture, manager, router in
-            manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main", draft: "ordinary draft")
+            let ordinary = try self.showOrdinaryWindow(manager, fixture: fixture, draft: "ordinary draft")
             let ordinaryContext = try #require(manager.approvalContext(connection: fixture.gateway))
-            let ordinaryWindow = try #require(NSApp.keyWindow)
-            let ordinary = try #require(ordinaryWindow.delegate as? WebChatSwiftUIWindowController)
+            let ordinaryWindow = try #require(ordinary._testWindow)
+            #expect(ordinaryContext.windowID == ObjectIdentifier(ordinary))
             #expect(ordinaryContext.nativeBinding == nil)
             #expect(await router.open(.session(fixture.target)) == .opened)
             let gateway = try await manager.captureNativeGateway(gatewayID: fixture.gatewayID)
@@ -414,8 +419,9 @@ struct NativeActionRouterTests {
             #expect(ordinaryWindow.isVisible)
             native.close()
             manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main", draft: "replacement")
-            #expect(NSApp.keyWindow === ordinaryWindow)
-            #expect(manager.approvalContext(connection: fixture.gateway)?.windowID == ordinaryContext.windowID)
+            #expect(ordinaryWindow.isVisible)
+            #expect(ordinary._testWindow === ordinaryWindow)
+            #expect(manager.approvalContext(connection: fixture.gateway)?.windowID == ObjectIdentifier(ordinary))
             #expect(ordinary.viewModel.input == "ordinary draft")
         }
     }
@@ -444,8 +450,7 @@ struct NativeActionRouterTests {
 
             let replacement: WebChatSwiftUIWindowController
             if ordinaryReplacement {
-                manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main", draft: "kept")
-                replacement = try #require(NSApp.keyWindow?.delegate as? WebChatSwiftUIWindowController)
+                replacement = try self.showOrdinaryWindow(manager, fixture: fixture, draft: "kept")
             } else {
                 replacement = try manager.presentNative(.session(fixture.target), gateway: gateway)
             }
@@ -536,8 +541,7 @@ struct NativeActionRouterTests {
             let expectedProfile = scenario == "ordinary" ? nil : fixture.profileID.value
             let controller: WebChatSwiftUIWindowController
             if scenario == "ordinary" {
-                manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main")
-                controller = try #require(NSApp.keyWindow?.delegate as? WebChatSwiftUIWindowController)
+                controller = try self.showOrdinaryWindow(manager, fixture: fixture)
             } else {
                 controller = try manager.presentNative(.session(fixture.target), gateway: gateway)
             }
@@ -585,8 +589,7 @@ struct NativeActionRouterTests {
             let expectedProfile = scenario == "ordinary" ? nil : fixture.profileID.value
             let controller: WebChatSwiftUIWindowController
             if scenario == "ordinary" {
-                manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main")
-                controller = try #require(NSApp.keyWindow?.delegate as? WebChatSwiftUIWindowController)
+                controller = try self.showOrdinaryWindow(manager, fixture: fixture)
             } else {
                 controller = try manager.presentNative(.session(fixture.target), gateway: gateway)
             }
@@ -777,6 +780,25 @@ struct NativeActionRouterTests {
         }
         fixture.releaseRequest()
         await fixture.gateway.shutdown()
+    }
+
+    private func showOrdinaryWindow(
+        _ manager: WebChatManager,
+        fixture: MacNativeActionFixture,
+        draft: String? = nil) throws -> WebChatSwiftUIWindowController
+    {
+        // Capture the synchronous presentation owner; headless runs need not grant app focus.
+        let previousWindows = Set(NSApp.windows.map(ObjectIdentifier.init))
+        manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main", draft: draft)
+        let controllers = NSApp.windows
+            .filter { !previousWindows.contains(ObjectIdentifier($0)) }
+            .compactMap { $0.delegate as? WebChatSwiftUIWindowController }
+        try #require(controllers.count == 1)
+        let controller = try #require(controllers.first)
+        let transport = try #require(controller.gatewayTransport)
+        try #require(transport.connection === fixture.gateway)
+        try #require(transport.nativeBinding == nil)
+        return controller
     }
 
     private func waitForHeldWidgetRefresh(_ fixture: MacNativeActionFixture) async throws {
