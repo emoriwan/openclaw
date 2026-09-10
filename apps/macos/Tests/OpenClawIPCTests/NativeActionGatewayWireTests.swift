@@ -1,5 +1,9 @@
+import AppKit
+import CryptoKit
 import Foundation
+import OpenClawChatUI
 import OpenClawKit
+import OpenClawProtocol
 import Testing
 @testable import OpenClaw
 
@@ -10,6 +14,28 @@ private struct MacNativeWireDescriptor: Decodable, Sendable {
         let message: String
     }
 
+    struct Media: Decodable, Sendable {
+        struct Session: Decodable, Sendable {
+            let sessionKey: String
+            let artifactID: String
+        }
+
+        let pngBase64: String
+        let sha256: String
+        let sessions: [String: Session]
+    }
+
+    struct Approvals: Decodable, Sendable {
+        struct Request: Decodable, Sendable {
+            let id: String
+            let sessionKey: String
+            let command: String
+        }
+
+        let gatewayURL: URL
+        let requests: [String: Request]
+    }
+
     let version: Int
     let gatewayURL: URL
     let controlURL: URL
@@ -17,6 +43,8 @@ private struct MacNativeWireDescriptor: Decodable, Sendable {
     let aliceProfileID: String
     let bobProfileID: String
     let cases: [String: Case]
+    let media: Media
+    let approvals: Approvals
 }
 
 private struct MacNativeWireControlResponse: Decodable, Sendable {
@@ -158,6 +186,7 @@ struct NativeActionGatewayWireTests {
                 let router = NativeActionRouter(windows: manager, launchPlan: .init(arguments: ["OpenClaw"]))
                 try await self.exercise(
                     control: control, gatewayID: gatewayID, manager: manager, router: router)
+                try await self.exerciseApprovals(control: control, gatewayID: gatewayID)
             }
         } catch {
             await connection.shutdown()
@@ -173,13 +202,23 @@ struct NativeActionGatewayWireTests {
         router: NativeActionRouter) async throws
     {
         let descriptor = control.descriptor
-        func prepare(_ id: String, profileID: String? = nil) async throws -> OpenClawNativePreparedSend {
+        func target(_ id: String, profileID: String? = nil) throws -> OpenClawNativeSessionRef {
             let spec = try #require(descriptor.cases[id])
-            let target = OpenClawNativeSessionRef(
+            return OpenClawNativeSessionRef(
                 owner: .init(gatewayID: gatewayID, profileID: profileID ?? descriptor.aliceProfileID),
                 agentID: "qa",
                 sessionKey: spec.sessionKey)
-            return try await router.prepareSend(to: target, message: spec.message)
+        }
+        func prepare(_ id: String, profileID: String? = nil) async throws -> OpenClawNativePreparedSend {
+            let spec = try #require(descriptor.cases[id])
+            return try await router.prepareSend(
+                to: target(id, profileID: profileID),
+                message: spec.message)
+        }
+        func transport(_ id: String, profileID: String? = nil) async throws -> MacGatewayChatTransport {
+            let gateway = try await manager.captureNativeGateway(gatewayID: gatewayID)
+            let controller = try manager.presentNative(.session(target(id, profileID: profileID)), gateway: gateway)
+            return try #require(controller.gatewayTransport)
         }
         func allowed(_ id: String, profileID: String? = nil) async throws -> OpenClawNativeRunRef {
             let prepared = try await prepare(id, profileID: profileID)
@@ -207,6 +246,8 @@ struct NativeActionGatewayWireTests {
         // Each pair shares a session, so preparing the second must preserve the first presentation.
         let acl = try await prepare("acl")
         let aclSuspended = try await prepare("aclSuspended")
+        let aclMedia = try await transport("acl")
+        try await self.verifyMedia(control, transport: aclMedia, id: "aclAllowed", session: "acl", allowed: true)
         let aclResult = try await control.submitHolding("users.self", prepared: aclSuspended) { _ in
             let response = try await control.request("revoke-acl")
             try #require(response.revoked == true)
@@ -217,7 +258,10 @@ struct NativeActionGatewayWireTests {
             try await control.verify(id)
             try await control.complete(id)
         }
+        try await self.verifyMedia(control, transport: aclMedia, id: "acl", session: "acl", allowed: false)
         _ = try await allowed("controlACL")
+        try await self.verifyMedia(
+            control, transport: transport("controlACL"), id: "controlACL", session: "controlACL", allowed: true)
 
         let accepted = try await prepare("accepted")
         var acceptedRunID: String?
@@ -233,8 +277,15 @@ struct NativeActionGatewayWireTests {
         try await control.verify("accepted", run: receipt)
         try await control.complete("accepted")
 
+        let widgetTransport = try await transport("controlACL")
+        let initialWidget = try await self.verifyWidget(
+            control, transport: widgetTransport, id: "allowed", replacing: nil, allowed: true)
+        let widget = try #require(initialWidget)
         let profile = try await prepare("profile")
         let profileSuspended = try await prepare("profileSuspended")
+        let profileMedia = try await transport("profile")
+        try await self.verifyMedia(
+            control, transport: profileMedia, id: "profileAllowed", session: "profile", allowed: true)
         let profileResult = try await control.submitHolding("users.self", prepared: profileSuspended) { _ in
             let response = try await control.request("merge-profile")
             try #require(response.profileID == descriptor.bobProfileID)
@@ -245,7 +296,248 @@ struct NativeActionGatewayWireTests {
             try await control.verify(id)
             try await control.complete(id)
         }
+        _ = try await self.verifyWidget(
+            control, transport: widgetTransport, id: "profile", replacing: widget, allowed: false)
+        try await self.verifyMedia(
+            control, transport: profileMedia, id: "profile", session: "profile", allowed: false)
         _ = try await allowed("controlProfile", profileID: descriptor.bobProfileID)
+        let fresh = try await transport("controlProfile", profileID: descriptor.bobProfileID)
+        try await self.verifyMedia(
+            control, transport: fresh, id: "controlProfile", session: "controlProfile", allowed: true)
+        _ = try await self.verifyWidget(control, transport: fresh, id: "controlProfile", replacing: nil, allowed: true)
+    }
+
+    private func verifyMedia(
+        _ control: MacNativeWireControl,
+        transport: MacGatewayChatTransport,
+        id: String,
+        session: String,
+        allowed: Bool) async throws
+    {
+        let media = try #require(control.descriptor.media.sessions[session])
+        try await control.request("media-start", fields: ["case": id])
+        var fields = ["case": id, "outcome": allowed ? "allowed" : "rejected"]
+        if allowed {
+            let loaded = try await transport.loadMediaArtifact(
+                sessionKey: media.sessionKey, artifactId: media.artifactID, kind: .image, playback: nil)
+            guard case let .data(value) = loaded else {
+                throw OpenClawNativeActionError("The native PNG did not load as data.")
+            }
+            let expected = try #require(Data(base64Encoded: control.descriptor.media.pngBase64))
+            try #require(value.mimeType == "image/png" && value.data == expected)
+            let digest = SHA256.hash(data: value.data).map { String(format: "%02x", $0) }.joined()
+            try #require(digest == control.descriptor.media.sha256)
+            fields["sha256"] = digest
+        } else {
+            let rejection: Error?
+            do {
+                _ = try await transport.loadMediaArtifact(
+                    sessionKey: media.sessionKey, artifactId: media.artifactID, kind: .image, playback: nil)
+                rejection = nil
+            } catch {
+                rejection = error
+            }
+            let error = try #require(rejection, "Retired native media authority was accepted.")
+            try #require(error is GatewayResponseError || error is OpenClawChatTransportSendError)
+            try #require(!error.localizedDescription.isEmpty)
+            if id == "profile", error is OpenClawChatTransportSendError {
+                try #require(transport.nativeBinding != nil && !transport.nativeBindingIsCurrent)
+                fields["locallyRetired"] = "true"
+            }
+        }
+        try await control.request("media-complete", fields: fields)
+    }
+
+    private func verifyWidget(
+        _ control: MacNativeWireControl,
+        transport: MacGatewayChatTransport,
+        id: String,
+        replacing resource: OpenClawChatWidgetResource?,
+        allowed: Bool) async throws -> OpenClawChatWidgetResource?
+    {
+        try await control.request("widget-start", fields: ["case": id])
+        let resolved = await transport.resolveInlineWidgetResource(
+            path: "/__openclaw__/canvas/documents/native.html", replacing: resource)
+        if allowed {
+            let value = try #require(resolved)
+            try #require(value.url.host == control.descriptor.gatewayURL.host)
+            try #require(value.url.port == control.descriptor.gatewayURL.port)
+        } else {
+            try #require(resolved == nil)
+            try #require(!transport.nativeBindingIsCurrent)
+            try #require(await transport.resolveInlineWidgetResource(
+                path: "/__openclaw__/canvas/documents/native.html", replacing: resource) == nil)
+        }
+        try await control.request(
+            "widget-complete", fields: ["case": id, "outcome": allowed ? "allowed" : "rejected"])
+        return resolved
+    }
+
+    private func exerciseApprovals(control: MacNativeWireControl, gatewayID: String) async throws {
+        let descriptor = control.descriptor
+        func connection() -> GatewayConnection {
+            GatewayConnection(
+                endpointProvider: {
+                    .init(
+                        config: (descriptor.approvals.gatewayURL, nil, nil),
+                        routeAuthority: nil,
+                        deviceAuthGatewayID: gatewayID)
+                },
+                supportsSharedEndpointRecovery: false)
+        }
+        let requester = connection()
+        let presenter = connection()
+        do {
+            // Separate sockets share the real native device identity. Only this
+            // approval endpoint gains approvals scope; the send socket stays a writer.
+            for connection in [requester, presenter] {
+                do {
+                    _ = try await connection.acquireServerLease()
+                } catch {
+                    try await control.request("pair-approval")
+                    _ = try await connection.acquireServerLease()
+                }
+                let hello = try #require(await connection.lastSnapshot)
+                let scopes = try #require(hello.auth["scopes"]?.arrayValue).compactMap(\.stringValue)
+                try #require(Set(scopes) == ["operator.read", "operator.write", "operator.approvals"])
+            }
+            let lease = try await requester.acquireServerLease()
+            struct Response: Decodable {
+                let id: String
+                let status: String?
+                let deliveryRoute: String?
+                let decision: String?
+            }
+            func request(_ id: String) async throws {
+                let spec = try #require(descriptor.approvals.requests[id])
+                let data = try await requester.request(
+                    method: "exec.approval.request",
+                    params: [
+                        "id": AnyCodable(spec.id), "command": AnyCodable(spec.command),
+                        "agentId": AnyCodable("qa"), "sessionKey": AnyCodable(spec.sessionKey),
+                        "host": AnyCodable("gateway"), "ask": AnyCodable("always"),
+                        "twoPhase": AnyCodable(true), "timeoutMs": AnyCodable(120000),
+                    ],
+                    timeoutMs: 15000,
+                    ifCurrentServerLease: lease,
+                    expectedProfileId: descriptor.bobProfileID)
+                let response = try JSONDecoder().decode(Response.self, from: data)
+                try #require(response.id == spec.id && response.status == "accepted")
+                try #require(response.deliveryRoute == "approval-client")
+            }
+            func decision(_ id: String, expected: String) async throws {
+                let spec = try #require(descriptor.approvals.requests[id])
+                let data = try await requester.request(
+                    method: "exec.approval.waitDecision",
+                    params: ["id": AnyCodable(spec.id)],
+                    timeoutMs: 15000,
+                    ifCurrentServerLease: lease,
+                    expectedProfileId: descriptor.bobProfileID)
+                let response = try JSONDecoder().decode(Response.self, from: data)
+                try #require(response.id == spec.id && response.decision == expected)
+            }
+            try await withWebChatManagerLifetime(primaryConnection: presenter) { manager in
+                func present(_ id: String) async throws {
+                    let spec = try #require(descriptor.approvals.requests[id])
+                    let session = OpenClawNativeSessionRef(
+                        owner: .init(gatewayID: gatewayID, profileID: descriptor.bobProfileID),
+                        agentID: "qa", sessionKey: spec.sessionKey)
+                    let gateway = try await manager.captureNativeGateway(gatewayID: gatewayID)
+                    _ = try await gateway.actions.history(session: session)
+                    let controller = try manager.presentNative(.session(session), gateway: gateway)
+                    let deadline = ContinuousClock.now + .seconds(10)
+                    while ContinuousClock.now < deadline {
+                        if controller.hasPresentedNative(.session(session)),
+                           manager.approvalContext(connection: presenter)?.windowID == ObjectIdentifier(controller),
+                           manager.approvalContext(connection: presenter)?.nativeBinding != nil
+                        { return }
+                        try await Task.sleep(for: .milliseconds(20))
+                    }
+                    throw OpenClawNativeActionError("Native approval context did not become current.")
+                }
+                let prompter = ExecApprovalsGatewayPrompter(gateway: presenter) { [weak manager] in
+                    manager?.approvalContext(connection: presenter)
+                }
+                prompter.start()
+                defer { prompter.stop() }
+                try await present("allowed")
+                try await request("allowed")
+                let allowed = try await self.approvalPanel(
+                    command: #require(descriptor.approvals.requests["allowed"]).command)
+                try self.pressApprovalButton("Allow Once", in: allowed)
+                try await decision("allowed", expected: "allow-once")
+                try await control.request("approval-allowed")
+
+                try await request("visible")
+                let visible = try await self.approvalPanel(
+                    command: #require(descriptor.approvals.requests["visible"]).command)
+                try await request("queued")
+                try await present("control")
+                try await request("control")
+                try self.pressApprovalButton("Allow Once", in: visible)
+                // The fresh panel is a FIFO barrier: the real prompter has
+                // consumed the visible decision and the older queued request.
+                let fresh = try await self.approvalPanel(
+                    command: #require(descriptor.approvals.requests["control"]).command)
+                try await control.request("approval-retired")
+                try await decision("visible", expected: "deny")
+                try await decision("queued", expected: "deny")
+                try self.pressApprovalButton("Don't Allow", in: fresh)
+                try await decision("control", expected: "deny")
+                try await control.request("approval-complete")
+            }
+        } catch {
+            await requester.shutdown()
+            await presenter.shutdown()
+            throw error
+        }
+        await requester.shutdown()
+        await presenter.shutdown()
+    }
+
+    private func approvalElements(in root: NSView) -> [AnyObject] {
+        var elements: [AnyObject] = []
+        var visited = Set<ObjectIdentifier>()
+        func visit(_ element: AnyObject) {
+            guard visited.insert(ObjectIdentifier(element)).inserted else { return }
+            elements.append(element)
+            for child in element.accessibilityChildren?() ?? [] {
+                visit(child as AnyObject)
+            }
+        }
+        root.layoutSubtreeIfNeeded()
+        visit(root)
+        return elements
+    }
+
+    private func approvalPanel(command: String) async throws -> NSView {
+        let deadline = ContinuousClock.now + .seconds(15)
+        while ContinuousClock.now < deadline {
+            for window in NSApp.windows where window.isVisible && window.title == "OpenClaw Command Approval" {
+                guard let root = window.contentView else { continue }
+                if self.approvalElements(in: root).contains(where: { element in
+                    [element.accessibilityLabel?(), element.accessibilityTitle?(),
+                     element.accessibilityValue?() as? String]
+                        .compactMap(\.self).contains(where: { $0.contains(command) })
+                }) {
+                    return root
+                }
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw OpenClawNativeActionError("The expected native approval panel did not appear.")
+    }
+
+    private func pressApprovalButton(_ title: String, in root: NSView) throws {
+        let buttons = self.approvalElements(in: root).filter { element in
+            element.accessibilityRole?() == .button &&
+                element.isAccessibilityEnabled?() == true &&
+                [element.accessibilityLabel?(), element.accessibilityTitle?()]
+                    .compactMap(\.self).contains(title)
+        }
+        try #require(buttons.count == 1)
+        let button = try #require(buttons.first)
+        try #require(button.accessibilityPerformPress?() == true)
     }
 
     private func requireVisibleRejection(_ operation: () async throws -> Void) async throws {
