@@ -26,6 +26,23 @@ const scriptPath = "scripts/package-mac-app.sh";
 const swiftScriptPath = "scripts/lib/mac-swift-build.sh";
 
 describe.skipIf(process.platform === "win32")("App Intents metadata inputs", () => {
+  it("includes enum constants for native session operation parameters", () => {
+    const protocols = path.join(tempDirs.make("openclaw-intents-"), "protocols.json");
+    const result = spawnSync(
+      "/bin/bash",
+      [
+        "-c",
+        'set -euo pipefail; source "$1"; write_app_intents_protocols "$2"',
+        "metadata",
+        path.resolve(swiftScriptPath),
+        protocols,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(protocols, "utf8"))).toContain("AppEnum");
+  });
+
   function fixture() {
     const root = tempDirs.make("openclaw-intents-");
     const products = path.join(root, "products");

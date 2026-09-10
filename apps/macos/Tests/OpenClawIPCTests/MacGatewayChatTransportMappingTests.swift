@@ -332,6 +332,134 @@ struct MacGatewayChatTransportMappingTests {
         await fixture.gateway.shutdown()
     }
 
+    @Test(arguments: ["direct", "targeted", "captured"])
+    func `native send receipts survive lease retirement without granting fresh authority`(
+        _ path: String) async throws
+    {
+        let fixture = try MacNativeActionFixture(holding: "chat.send")
+        var pending: Task<OpenClawChatSendResponse, Error>?
+        do {
+            let original = try await fixture.gateway.acquireServerLease()
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                nativeBinding: .init(owner: fixture.target.owner, lease: original))
+            let acquired = await transport.acquireOutboxRouteLease(ifCurrentServerLease: original)
+            guard case let .available(captured) = acquired else {
+                Issue.record("Expected a live native send lease")
+                throw CancellationError()
+            }
+            let request = Task {
+                switch path {
+                case "captured":
+                    try await captured.sendMessage(
+                        sessionKey: fixture.target.sessionKey, agentID: "main",
+                        message: "native", thinking: "off", idempotencyKey: "operation", attachments: [])
+                case "targeted":
+                    try await transport.sendMessage(
+                        sessionKey: fixture.target.sessionKey, agentID: "main",
+                        expectedSessionRoutingContract: captured.sessionRoutingContract,
+                        message: "native", thinking: "off", idempotencyKey: "operation", attachments: [])
+                default:
+                    try await transport.sendMessage(
+                        sessionKey: fixture.target.sessionKey,
+                        message: "native", thinking: "off", idempotencyKey: "operation", attachments: [])
+                }
+            }
+            pending = request
+            let deadline = ContinuousClock.now + .seconds(3)
+            while fixture.heldRequest.value == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try #require(fixture.heldRequest.value != nil)
+            // Keep the original socket alive to deliver its ACK after the
+            // endpoint owner retires. No replacement request may supply the receipt.
+            fixture.routeAuthority.setValue(1)
+            fixture.releaseRequest()
+            let response = try await request.value
+            #expect(response.runId == "gateway-accepted-run")
+            #expect(await fixture.gateway.isCurrentServerLease(original) == false)
+            #expect(await transport.captureChatServerLease() == nil)
+            await #expect(throws: OpenClawChatTransportSendError.self) {
+                _ = try await captured.sendMessage(
+                    sessionKey: fixture.target.sessionKey, agentID: "main",
+                    message: "later", thinking: "off", idempotencyKey: "later", attachments: [])
+            }
+            let frames = try fixture.frames(method: "chat.send")
+            #expect(frames.count == 1)
+            #expect(frames.first?["expectedProfileId"] as? String == fixture.target.owner.profileID)
+        } catch {
+            fixture.releaseRequest()
+            await fixture.gateway.shutdown()
+            _ = try? await pending?.value
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
+    @Test(arguments: ["default", "ordinary", "wrong-method", "rpc-error", "malformed"])
+    func `retired lease results remain strict outside native send receipts`(_ scenario: String) async throws {
+        let method = scenario == "wrong-method" ? "chat.history" : "chat.send"
+        let fixture = try MacNativeActionFixture(holding: method)
+        var pending: Task<Void, Error>?
+        do {
+            let original = try await fixture.gateway.acquireServerLease()
+            let transport = MacGatewayChatTransport(
+                connection: fixture.gateway,
+                outboxGatewayID: scenario == "ordinary" ? "local-store" : nil,
+                nativeBinding: scenario == "ordinary" ? nil : .init(owner: fixture.target.owner, lease: original))
+            let acquired = await transport.acquireOutboxRouteLease(ifCurrentServerLease: original)
+            guard case let .available(captured) = acquired else {
+                Issue.record("Expected a live send lease")
+                throw CancellationError()
+            }
+            let request = Task {
+                switch scenario {
+                case "default":
+                    _ = try await fixture.gateway.chatSend(
+                        sessionKey: fixture.target.sessionKey,
+                        message: "native", thinking: "off", idempotencyKey: "operation", attachments: [],
+                        ifCurrentServerLease: original)
+                case "wrong-method":
+                    _ = try await fixture.gateway.request(
+                        method: method,
+                        params: ["sessionKey": .init(fixture.target.sessionKey)],
+                        ifCurrentServerLease: original,
+                        completionPolicy: .preserveChatSendSuccess)
+                default:
+                    _ = try await captured.sendMessage(
+                        sessionKey: fixture.target.sessionKey, agentID: "main",
+                        message: "native", thinking: "off", idempotencyKey: "operation", attachments: [])
+                }
+            }
+            pending = request
+            let deadline = ContinuousClock.now + .seconds(3)
+            while fixture.heldRequest.value == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            try #require(fixture.heldRequest.value != nil)
+            fixture.routeAuthority.setValue(1)
+            if scenario == "rpc-error" {
+                try fixture.rejectRequest(code: "UNAVAILABLE")
+            } else {
+                if scenario == "malformed" {
+                    let (socket, response) = try #require(fixture.heldRequest.value)
+                    var frame = try #require(JSONSerialization.jsonObject(with: response) as? [String: Any])
+                    frame["payload"] = ["status": "started"]
+                    try fixture.heldRequest.setValue((socket, JSONSerialization.data(withJSONObject: frame)))
+                }
+                fixture.releaseRequest()
+            }
+            await #expect(throws: CancellationError.self) { try await request.value }
+            #expect(try fixture.frames(method: method).count == 1)
+        } catch {
+            fixture.releaseRequest()
+            await fixture.gateway.shutdown()
+            _ = try? await pending?.value
+            throw error
+        }
+        await fixture.gateway.shutdown()
+    }
+
     private actor RequestRecorder {
         var payloads: [Data] = []
 

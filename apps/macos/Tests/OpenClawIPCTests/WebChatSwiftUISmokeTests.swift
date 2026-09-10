@@ -255,24 +255,18 @@ struct WebChatSwiftUISmokeTests {
         }
     }
 
-    @Test func `native inspection acknowledges the selected run and releases on close`() async throws {
+    @Test func `native inspection opens its selected chat without a sheet or composer mutation`() async throws {
         try await self.withNativeController { session, controller in
             let run = OpenClawNativeRunRef(session: session, runID: "selected-run")
             controller.viewModel.input = "preserved"
             let request = OpenClawNativeOpenRequest.inspect(run)
-            try controller.presentNative(request, inspection: OpenClawNativeRunInspection(
-                run: run, association: .observed, activity: .active, outcome: nil, reply: nil, error: nil))
-            #expect(!controller.hasPresentedNative(request))
-            let deadline = ContinuousClock.now + .seconds(3)
-            while !controller.hasPresentedNative(request), ContinuousClock.now < deadline {
-                try await Task.sleep(for: .milliseconds(10))
-            }
+            try controller.presentNative(request)
             #expect(controller.hasPresentedNative(request))
-            #expect(controller._testWindow?.attachedSheet != nil)
+            #expect(controller._testWindow?.attachedSheet == nil)
             #expect(controller.viewModel.input == "preserved")
-            #expect(throws: OpenClawNativeActionError.self) {
-                try controller.presentNative(.session(session))
-            }
+            try controller.presentNative(.session(session))
+            #expect(controller.hasPresentedNative(.session(session)))
+            #expect(controller.viewModel.input == "preserved")
             controller.gatewayTransport?.reportNativeRouteUnavailable()
             let lossDeadline = ContinuousClock.now + .seconds(3)
             while controller.viewModel.errorText == nil, ContinuousClock.now < lossDeadline {

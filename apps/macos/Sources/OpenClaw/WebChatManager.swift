@@ -139,7 +139,13 @@ final class WebChatManager {
     private var unavailableProfileIDs: Set<String> = []
     private var sessionObserverOwners = WebChatSessionObserverVisibilityOwners()
     private var sessionObserverMonitors: [ObjectIdentifier: Task<Void, Never>] = [:]
-    private var sessionObserverRequests: [ObjectIdentifier: (id: UUID, task: Task<Void, Never>)] = [:]
+    /// Keep attempted ownership through completion or failure until hidden ACK
+    /// or retirement. An ordinary owner's nil binding must stay unbound.
+    private var sessionObserverRequests:
+        [ObjectIdentifier: (
+            id: UUID,
+            task: Task<Void, Never>,
+            nativeBinding: MacGatewayChatTransport.NativeBinding?)] = [:]
     private var sessionObserverDeclarations:
         [ObjectIdentifier: (
             lease: GatewayConnection.ServerLease,
@@ -502,8 +508,7 @@ final class WebChatManager {
 
     func presentNative(
         _ request: OpenClawNativeOpenRequest,
-        gateway: NativeGateway,
-        inspection: OpenClawNativeRunInspection? = nil) throws -> WebChatSwiftUIWindowController
+        gateway: NativeGateway) throws -> WebChatSwiftUIWindowController
     {
         try Task.checkCancellation()
         guard gateway.windowGeneration == self.windowGeneration,
@@ -536,7 +541,7 @@ final class WebChatManager {
         guard self.nativePresentationIsCurrent(controller, gateway: gateway, session: request.session) else {
             throw CancellationError()
         }
-        try controller.presentNative(request, inspection: inspection)
+        try controller.presentNative(request)
         return controller
     }
 
@@ -691,19 +696,18 @@ final class WebChatManager {
         connection: GatewayConnection)
     {
         let connectionID = ObjectIdentifier(connection)
-        let previous = self.sessionObserverRequests[connectionID]?.task
+        let previous = self.sessionObserverRequests[connectionID]
         let controller = self.sessionObserverController(connection: connection)
         let transport = controller?.gatewayTransport
-        guard !visible || controller != nil else { return }
+        guard visible ? controller != nil : previous != nil else { return }
         let nativeBinding = if let controller {
             controller.gatewayTransport?.nativeBinding
         } else {
-            self.sessionObserverDeclarations[connectionID]?.nativeBinding
+            previous?.nativeBinding
         }
         let requestID = UUID()
         let task = Task { @MainActor [weak self, weak controller] in
-            await previous?.value
-            defer { self?.finishSessionObserverRequest(connection: connectionID, id: requestID) }
+            await previous?.task.value
             guard !Task.isCancelled, let self,
                   self.sessionObserverRequests[connectionID]?.id == requestID
             else { return }
@@ -759,6 +763,7 @@ final class WebChatManager {
                     } else {
                         self.sessionObserverDeclarations.removeValue(forKey: connectionID)
                         self.sessionObserverMonitors.removeValue(forKey: connectionID)?.cancel()
+                        self.sessionObserverRequests.removeValue(forKey: connectionID)
                     }
                     return
                 } catch {
@@ -766,7 +771,7 @@ final class WebChatManager {
                 }
             }
         }
-        self.sessionObserverRequests[connectionID] = (id: requestID, task: task)
+        self.sessionObserverRequests[connectionID] = (id: requestID, task: task, nativeBinding: nativeBinding)
     }
 
     private func sessionObserverController(connection: GatewayConnection) -> WebChatSwiftUIWindowController? {
@@ -781,11 +786,6 @@ final class WebChatManager {
         // Ordinary siblings keep their unbound observer semantics. Otherwise use
         // activation order, never a retired window or dictionary iteration order.
         return eligible.first { $0.gatewayTransport?.nativeBinding == nil } ?? eligible.first
-    }
-
-    private func finishSessionObserverRequest(connection: ObjectIdentifier, id: UUID) {
-        guard self.sessionObserverRequests[connection]?.id == id else { return }
-        self.sessionObserverRequests.removeValue(forKey: connection)
     }
 
     static func shouldReuseController(

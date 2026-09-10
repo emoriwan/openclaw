@@ -25,7 +25,7 @@ helper_bin_for_arch() {
 }
 
 write_app_intents_protocols() {
-  printf '%s\n' '["AppIntent","OpenIntent","AppEntity","AppIntentsPackage","AppShortcutsProvider","EntityQuery","EntityStringQuery"]' > "$1"
+  printf '%s\n' '["AppIntent","OpenIntent","AppEntity","AppEnum","AppIntentsPackage","AppShortcutsProvider","EntityQuery","EntityStringQuery"]' > "$1"
 }
 
 capture_app_intents_inputs() {

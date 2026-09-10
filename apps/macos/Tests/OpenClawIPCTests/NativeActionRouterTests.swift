@@ -14,6 +14,7 @@ final class MacNativeActionFixture: @unchecked Sendable {
 
     let gateway: GatewayConnection
     let profileID = LockIsolated("profile-one")
+    let routeAuthority = LockIsolated<UInt64?>(nil)
     let requests = LockIsolated<[Data]>([])
     let capabilities = LockIsolated([
         GatewayServerCapability.profileBinding.rawValue,
@@ -22,6 +23,8 @@ final class MacNativeActionFixture: @unchecked Sendable {
         GatewayServerCapability.sessionSettingsCAS.rawValue,
     ])
     let heldRequest = LockIsolated<(GatewayTestWebSocketTask, Data)?>(nil)
+    let healthOK = LockIsolated(true)
+    let historySessionInfo = LockIsolated<[String: Any]?>(nil)
     let holdObserverHides = LockIsolated(false)
     let profileRejections = LockIsolated<[String]>([])
     let artifactUsesHTTP = LockIsolated(false)
@@ -30,10 +33,13 @@ final class MacNativeActionFixture: @unchecked Sendable {
     init(holding method: String? = nil) throws {
         let gatewayID = try #require(GatewayDiscoveryPreferences.deviceAuthGatewayID(root: Self.configuration))
         self.gatewayID = gatewayID
+        let routeAuthority = self.routeAuthority
         let profileID = self.profileID
         let requests = self.requests
         let capabilities = self.capabilities
         let heldRequest = self.heldRequest
+        let healthOK = self.healthOK
+        let historySessionInfo = self.historySessionInfo
         let holdObserverHides = self.holdObserverHides
         let profileRejections = self.profileRejections
         let artifactUsesHTTP = self.artifactUsesHTTP
@@ -67,6 +73,8 @@ final class MacNativeActionFixture: @unchecked Sendable {
                 let params = frame["params"] as? [String: Any] ?? [:]
                 let payload: [String: Any]
                 switch requestedMethod {
+                case "health":
+                    payload = ["ok": healthOK.value]
                 case "users.self":
                     payload = ["profile": ["id": profileID.value]]
                 case "agents.list":
@@ -77,7 +85,8 @@ final class MacNativeActionFixture: @unchecked Sendable {
                     let key = params["sessionKey"] as? String ?? Self.sessionKey
                     payload = [
                         "sessionKey": key, "sessionId": "native-session",
-                        "sessionInfo": ["key": key, "agentId": "main", "sessionId": "native-session"],
+                        "sessionInfo": historySessionInfo.value ??
+                            ["key": key, "agentId": "main", "sessionId": "native-session"],
                         "messages": [], "thinkingLevel": "off",
                     ]
                 case "chat.send":
@@ -134,7 +143,7 @@ final class MacNativeActionFixture: @unchecked Sendable {
             testEndpointProvider: {
                 .init(
                     config: (URL(string: "ws://127.0.0.1:49383")!, nil, nil),
-                    routeAuthority: nil,
+                    routeAuthority: routeAuthority.value,
                     deviceAuthGatewayID: gatewayID)
             },
             sessionBox: WebSocketSessionBox(session: sockets))
@@ -319,6 +328,74 @@ struct NativeActionRouterTests {
         }
     }
 
+    @Test(arguments: ["selected-run", "other-run", "other-session"])
+    func `inspection returns only the selected run facts and opens its verified chat`(
+        _ historyOwner: String) async throws
+    {
+        try await self.withFixture { fixture, manager, router in
+            let run = OpenClawNativeRunRef(session: fixture.target, runID: "selected-run")
+            fixture.historySessionInfo.setValue([
+                "key": historyOwner == "other-session" ? "agent:main:other" : run.session.sessionKey,
+                "agentId": run.session.agentID, "lastRunId": historyOwner, "status": "done",
+            ])
+            if historyOwner == "other-session" {
+                await #expect(throws: OpenClawNativeActionError.self) { _ = try await router.inspect(run) }
+                #expect(manager.approvalContext(connection: fixture.gateway) == nil)
+            } else {
+                let inspection = try await router.inspect(run)
+                #expect(inspection.run == run)
+                #expect(inspection.association == (historyOwner == run.runID ? .observed : .notObserved))
+                #expect(inspection.outcome == (historyOwner == run.runID ? .done : nil))
+                #expect(!inspection.summary.isEmpty)
+                let gateway = try await manager.captureNativeGateway(gatewayID: fixture.gatewayID)
+                let controller = try manager.presentNative(.inspect(run), gateway: gateway)
+                #expect(controller.hasPresentedNative(.inspect(run)))
+                #expect(!controller.viewModel.isLoading)
+                #expect(controller.viewModel.healthOK)
+                #expect(controller._testWindow?.attachedSheet == nil)
+            }
+            let history = try #require(try fixture.frames(method: "chat.history").first)
+            let params = try #require(history["params"] as? [String: Any])
+            #expect(history["expectedProfileId"] as? String == run.session.owner.profileID)
+            #expect(params["sessionKey"] as? String == run.session.sessionKey)
+            #expect(params["inputRunIds"] as? [String] == [run.runID])
+            #expect(try fixture.frames(method: "chat.send").isEmpty)
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func `inspect continuation never reports opened while its chat is unhealthy or still loading`(
+        holdHistory: Bool) async throws
+    {
+        try await self.withFixture(holding: holdHistory ? "chat.history" : nil) { fixture, _, router in
+            fixture.healthOK.setValue(holdHistory)
+            let run = OpenClawNativeRunRef(session: fixture.target, runID: "selected-run")
+            let pending = Task { await router.open(.inspect(run)) }
+            do {
+                if holdHistory {
+                    _ = try await self.waitForObserverFrames(
+                        fixture, method: "chat.history", count: 1, holdingResponse: true)
+                    fixture.releaseRequest()
+                    // Run validation completes, but the visible chat's own
+                    // bootstrap must not be bypassed by the inspect continuation.
+                    _ = try await self.waitForObserverFrames(
+                        fixture, method: "chat.history", count: 2, holdingResponse: true)
+                }
+                guard case .unavailable = await pending.value else {
+                    Issue.record("Inspection acknowledged a chat before it was ready")
+                    fixture.releaseRequest()
+                    return
+                }
+                fixture.releaseRequest()
+            } catch {
+                pending.cancel()
+                fixture.releaseRequest()
+                _ = await pending.value
+                throw error
+            }
+        }
+    }
+
     @Test func `native open preserves an already warm ordinary window and its draft`() async throws {
         try await self.withFixture { fixture, manager, router in
             manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main", draft: "ordinary draft")
@@ -444,6 +521,57 @@ struct NativeActionRouterTests {
             #expect(replacement.isVisible)
             #expect(!replacement.nativeRouteLost)
             #expect(!replacement.viewModel.isTransportDetached)
+        }
+    }
+
+    @Test(arguments: ["pending", "failed", "profile-change", "ordinary"])
+    func `last window cleanup retains its binding without a confirmed observer declaration`(
+        _ scenario: String) async throws
+    {
+        try await self.withFixture(holding: "sessions.subscribe") { fixture, manager, _ in
+            defer { fixture.releaseRequest() }
+            let gateway = try await manager.captureNativeGateway(gatewayID: fixture.gatewayID)
+            let expectedProfile = scenario == "ordinary" ? nil : fixture.profileID.value
+            let controller: WebChatSwiftUIWindowController
+            if scenario == "ordinary" {
+                manager.show(sessionKey: MacNativeActionFixture.sessionKey, agentID: "main")
+                controller = try #require(NSApp.keyWindow?.delegate as? WebChatSwiftUIWindowController)
+            } else {
+                controller = try manager.presentNative(.session(fixture.target), gateway: gateway)
+            }
+            _ = try await self.waitForObserverFrames(
+                fixture, method: "sessions.subscribe", count: 1, holdingResponse: true)
+            if scenario == "failed" {
+                try fixture.rejectRequest(
+                    code: "INVALID_REQUEST",
+                    details: ["reason": "EXPECTED_PROFILE_MISMATCH", "execution": "not_started"])
+                let deadline = ContinuousClock.now + .seconds(3)
+                while !controller.viewModel.isTransportDetached, ContinuousClock.now < deadline {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                try #require(controller.viewModel.isTransportDetached)
+            }
+            if scenario == "profile-change" || scenario == "ordinary" {
+                fixture.profileID.setValue("replacement-profile")
+            }
+            if scenario != "ordinary" {
+                controller.gatewayTransport?.reportNativeRouteUnavailable()
+                try #require(controller.nativeRouteLost)
+            }
+            controller.close()
+            fixture.releaseRequest()
+            let hides = try await self.waitForObserverFrames(
+                fixture, count: scenario == "profile-change" ? 2 : 1)
+            #expect(hides.allSatisfy {
+                ($0["params"] as? [String: Any])?["visible"] as? Bool == false &&
+                    $0["expectedProfileId"] as? String == expectedProfile
+            })
+            #expect(await fixture.gateway.isCurrentServerLease(gateway.lease))
+            #expect(!manager._testSessionObserverVisible(connection: fixture.gateway))
+            #expect(try fixture.frames(method: "sessions.subscribe").count == 1)
+            if scenario == "profile-change" {
+                #expect(fixture.profileRejections.value == hides.compactMap { $0["id"] as? String })
+            }
         }
     }
 

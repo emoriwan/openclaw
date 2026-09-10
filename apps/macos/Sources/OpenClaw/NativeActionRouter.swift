@@ -123,14 +123,14 @@ final class NativeActionRouter: OpenClawNativeActionHost {
         let history = try await gateway.actions.history(session: request.session, runID: run?.runID)
         let inspection = try run.map { try OpenClawChatNativeRunInspection.reduce(history, run: $0) }
         guard await gateway.connection.isCurrentServerLease(gateway.lease) else { throw CancellationError() }
-        let controller = try self.windows.presentNative(request, gateway: gateway, inspection: inspection)
+        let controller = try self.windows.presentNative(request, gateway: gateway)
         let deadline = ContinuousClock.now.advanced(by: .seconds(10))
         while ContinuousClock.now < deadline {
             guard await gateway.connection.isCurrentServerLease(gateway.lease),
                   self.windows.nativePresentationIsCurrent(controller, gateway: gateway, session: request.session)
             else { throw CancellationError() }
             if controller.hasPresentedNative(request),
-               run != nil || (!controller.viewModel.isLoading && controller.viewModel.healthOK)
+               !controller.viewModel.isLoading, controller.viewModel.healthOK
             {
                 return (gateway, controller, inspection)
             }

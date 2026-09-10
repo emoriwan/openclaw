@@ -572,7 +572,8 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
                 idempotencyKey: idempotencyKey,
                 attachments: attachments,
                 ifCurrentServerLease: self.nativeBinding?.lease,
-                expectedProfileId: self.nativeBinding?.owner.profileID)
+                expectedProfileId: self.nativeBinding?.owner.profileID,
+                completionPolicy: self.nativeBinding == nil ? .requireCurrentRoute : .preserveChatSendSuccess)
         }
     }
 
@@ -604,7 +605,8 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
                     idempotencyKey: idempotencyKey,
                     attachments: attachments,
                     ifCurrentServerLease: nativeBinding.lease,
-                    expectedProfileId: nativeBinding.owner.profileID)
+                    expectedProfileId: nativeBinding.owner.profileID,
+                    completionPolicy: .preserveChatSendSuccess)
             }
         }
         guard let route = await connection.captureRoute(),
@@ -674,7 +676,8 @@ struct MacGatewayChatTransport: OpenClawChatGatewayTransport {
                         idempotencyKey: id,
                         attachments: attachments,
                         ifCurrentServerLease: lease,
-                        expectedProfileId: self.nativeBinding?.owner.profileID)
+                        expectedProfileId: self.nativeBinding?.owner.profileID,
+                        completionPolicy: self.nativeBinding == nil ? .requireCurrentRoute : .preserveChatSendSuccess)
                 }
             },
             requestTargetedHistory: { sessionKey, agentID in
@@ -1018,26 +1021,11 @@ private enum MacChatMessageSpeechClient {
 }
 
 @MainActor
-@Observable
-private final class WebChatNativePresentation {
-    struct Inspection: Identifiable {
-        let value: OpenClawNativeRunInspection
-        var id: OpenClawNativeRunRef {
-            self.value.run
-        }
-    }
-
-    var inspection: Inspection?
-    var acknowledgedRun: OpenClawNativeRunRef?
-}
-
-@MainActor
 private struct MacChatSurface: View {
     @State private var viewModel: OpenClawChatViewModel
     @State private var appState = AppStateStore.shared
     @State private var talkController = TalkModeController.shared
     @State private var audioInputCatalog = MacChatAudioInputCatalog()
-    @State private var nativePresentation: WebChatNativePresentation
     @AppStorage(OpenClawChatWindowShell.assistantReasoningDefaultsKey, store: AppDefaults.standard)
     private var showsReasoning = WebChatTracePreferences.displayOptions().contains(.reasoning)
     @AppStorage(OpenClawChatWindowShell.assistantToolActivityDefaultsKey, store: AppDefaults.standard)
@@ -1051,14 +1039,12 @@ private struct MacChatSurface: View {
         viewModel: OpenClawChatViewModel,
         usesPrimaryAppRuntime: Bool,
         speech: OpenClawChatSpeechController,
-        voiceNoteRecorder: OpenClawVoiceNoteRecorder,
-        nativePresentation: WebChatNativePresentation)
+        voiceNoteRecorder: OpenClawVoiceNoteRecorder)
     {
         _viewModel = State(initialValue: viewModel)
         self.usesPrimaryAppRuntime = usesPrimaryAppRuntime
         self.speech = speech
         self.voiceNoteRecorder = voiceNoteRecorder
-        _nativePresentation = State(initialValue: nativePresentation)
     }
 
     var body: some View {
@@ -1077,44 +1063,6 @@ private struct MacChatSurface: View {
             })
             .onAppear { self.audioInputCatalog.start() }
             .onDisappear { self.audioInputCatalog.stop() }
-            .sheet(
-                item: self.$nativePresentation.inspection,
-                onDismiss: {
-                    self.nativePresentation.acknowledgedRun = nil
-                },
-                content: { presentation in
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("Run").font(.headline)
-                            Spacer()
-                            Button {
-                                self.nativePresentation.inspection = nil
-                            } label: {
-                                Image(systemName: "xmark")
-                            }
-                            .buttonStyle(.plain)
-                            .help("Close")
-                        }
-                        ScrollView {
-                            VStack(alignment: .leading, spacing: 12) {
-                                if !self.viewModel.healthOK, let error = self.viewModel.errorText {
-                                    Text(error).foregroundStyle(.secondary)
-                                }
-                                LabeledContent("Run", value: presentation.id.runID)
-                                LabeledContent("Session", value: presentation.id.session.sessionKey)
-                                LabeledContent("Agent", value: presentation.id.session.agentID)
-                                LabeledContent("Account", value: presentation.id.session.owner.profileID)
-                                LabeledContent("Gateway", value: presentation.id.session.owner.gatewayID)
-                                Divider()
-                                Text(presentation.value.summary).frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                            .textSelection(.enabled)
-                        }
-                    }
-                    .padding(24)
-                    .frame(width: 560, height: 460)
-                    .onAppear { self.nativePresentation.acknowledgedRun = presentation.id }
-                })
     }
 
     private var talkControl: OpenClawChatTalkControl {
@@ -1211,7 +1159,6 @@ final class WebChatSwiftUIWindowController: NSObject, NSWindowDelegate {
     private let sessionKey: String
     let viewModel: OpenClawChatViewModel
     let gatewayTransport: MacGatewayChatTransport?
-    private let nativePresentation = WebChatNativePresentation()
     private let contentController: NSViewController
     private let sessionKeyRelay: WebChatSessionKeyRelay
     private let speech: OpenClawChatSpeechController
@@ -1374,8 +1321,7 @@ final class WebChatSwiftUIWindowController: NSObject, NSWindowDelegate {
             viewModel: vm,
             usesPrimaryAppRuntime: usesPrimaryAppRuntime,
             speech: speech,
-            voiceNoteRecorder: voiceNoteRecorder,
-            nativePresentation: self.nativePresentation))
+            voiceNoteRecorder: voiceNoteRecorder))
         self.contentController = hosting
         super.init()
         self.window = Self.makeWindow(
@@ -1473,16 +1419,8 @@ final class WebChatSwiftUIWindowController: NSObject, NSWindowDelegate {
             self.currentAgentID?.utf8.elementsEqual(session.agentID.utf8) == true
     }
 
-    func presentNative(
-        _ request: OpenClawNativeOpenRequest,
-        inspection: OpenClawNativeRunInspection? = nil) throws
-    {
+    func presentNative(_ request: OpenClawNativeOpenRequest) throws {
         guard self.matchesNativeSession(request.session) else { throw CancellationError() }
-        if let current = self.nativePresentation.inspection {
-            guard case let .inspect(run) = request, current.id == run else {
-                throw OpenClawNativeActionError("Close the current run inspection, then try again.")
-            }
-        }
         switch request {
         case let .compose(_, draft):
             if let draft {
@@ -1491,24 +1429,14 @@ final class WebChatSwiftUIWindowController: NSObject, NSWindowDelegate {
                 }
                 self.viewModel.input = draft
             }
-        case let .inspect(run):
-            guard let inspection, inspection.run == run else { throw CancellationError() }
-            if self.nativePresentation.inspection?.id != run {
-                self.nativePresentation.acknowledgedRun = nil
-            }
-            self.nativePresentation.inspection = .init(value: inspection)
-        case .session:
+        case .session, .inspect:
             break
         }
         self.show()
     }
 
     func hasPresentedNative(_ request: OpenClawNativeOpenRequest) -> Bool {
-        guard self.isVisible, self.matchesNativeSession(request.session) else { return false }
-        if case let .inspect(run) = request {
-            return self.nativePresentation.acknowledgedRun == run
-        }
-        return self.nativePresentation.inspection == nil
+        self.isVisible && self.matchesNativeSession(request.session)
     }
 
     func show() {
@@ -1539,8 +1467,6 @@ final class WebChatSwiftUIWindowController: NSObject, NSWindowDelegate {
         self.routingIdentityTask?.cancel()
         self.routingIdentityTask = nil
         self.viewModel.detachTransport()
-        self.nativePresentation.inspection = nil
-        self.nativePresentation.acknowledgedRun = nil
         self.onVisibilityChanged?(false)
         let onClosed = self.onClosed
         self.onClosed = nil
