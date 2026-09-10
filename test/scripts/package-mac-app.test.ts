@@ -60,13 +60,12 @@ describe.skipIf(process.platform === "win32")("App Intents metadata inputs", () 
       path.join(toolchain, "usr/share/swift/features.json"),
       JSON.stringify({ features: [{ name: "const-extract-complete-metadata" }] }),
     );
-    const names = [
-      "Plain.swift",
-      "With spaces.swift",
-      'With "quotes".swift',
-      "With 'quotes'.swift",
+    const sources: [string, string, string, string] = [
+      path.join(root, "Plain.swift"),
+      path.join(root, "With spaces.swift"),
+      path.join(root, 'With "quotes".swift'),
+      path.join(root, "With 'quotes'.swift"),
     ];
-    const sources = names.map((name) => path.join(root, name));
     for (const source of sources) {
       writeFileSync(source, "// source\n");
     }
