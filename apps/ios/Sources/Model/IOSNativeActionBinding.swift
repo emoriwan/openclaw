@@ -149,7 +149,8 @@ struct IOSNativeActionBinding: Sendable {
         var request = original
         request.timeoutInterval = 12
         if isGateway, url.scheme == "https" {
-            for (name, value) in httpContext.customHeaders {
+            // Offer credentials and content headers own collisions with proxy headers.
+            for (name, value) in httpContext.customHeaders where request.value(forHTTPHeaderField: name) == nil {
                 request.setValue(value, forHTTPHeaderField: name)
             }
         }

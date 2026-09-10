@@ -381,7 +381,13 @@ final class TalkModeManager: NSObject {
     private var voiceAliases: [String: String] = [:]
     private var interruptOnSpeech: Bool = true
     private var gatewaySpeechLocaleID: String?
-    private var mainSessionKey: String = "main"
+    private var foregroundSessionKey: String = "main"
+    private var mainSessionKey: String {
+        // Native media and cleanup retain their captured target; foreground changes
+        // apply to ordinary Talk as soon as that native owner retires.
+        self.nativeCall?.binding.session.sessionKey ?? self.foregroundSessionKey
+    }
+
     private var fallbackVoiceId: String?
     private var lastPlaybackWasPCM: Bool = false
     private var speechGeneration = 0
@@ -650,12 +656,14 @@ final class TalkModeManager: NSObject {
 
     @discardableResult
     func updateMainSessionKey(_ sessionKey: String?) -> Bool {
-        // An accepted native call keeps its own session when the scene selection changes.
-        guard self.nativeCall == nil else { return false }
         let trimmed = (sessionKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return false }
-        if trimmed == self.mainSessionKey {
+        if trimmed == self.foregroundSessionKey {
             return false
+        }
+        if self.nativeCall != nil {
+            self.foregroundSessionKey = trimmed
+            return true
         }
         let hasTalkOwner = self.hasRealtimeOwnerOrStart || self.hasContinuousTalkOwner
         let shouldRestartTalk = self.isEnabled && hasTalkOwner
@@ -674,7 +682,7 @@ final class TalkModeManager: NSObject {
             deactivateAudioSession()
         }
         self.closeLogicalRealtimeVoiceSessions()
-        self.mainSessionKey = trimmed
+        self.foregroundSessionKey = trimmed
         if shouldRestartTalk, self.gatewayConnected, self.isEnabled {
             Task { await self.start() }
         }
@@ -684,6 +692,11 @@ final class TalkModeManager: NSObject {
     func isUsingMainSessionKey(_ sessionKey: String?) -> Bool {
         let trimmed = (sessionKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return !trimmed.isEmpty && trimmed == self.mainSessionKey
+    }
+
+    func isUsingForegroundSessionKey(_ sessionKey: String?) -> Bool {
+        let trimmed = (sessionKey ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && trimmed == self.foregroundSessionKey
     }
 
     func isActivePushToTalkCapture(_ captureId: String) -> Bool {
@@ -738,7 +751,6 @@ final class TalkModeManager: NSObject {
             self.closeLogicalRealtimeVoiceSessions()
             let call = NativeCall(binding: nativeBinding)
             self.nativeCall = call
-            self.mainSessionKey = nativeBinding.session.sessionKey
             self.isEnabled = true
             return self.scheduleNativeStart(call)
         }

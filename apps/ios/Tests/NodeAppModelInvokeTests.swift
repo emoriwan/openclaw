@@ -584,6 +584,7 @@ private func makeTalkModel() -> (TalkModeManager, NodeAppModel) {
 private func connectNativeTalkCleanupGateway(
     _ gateway: GatewayNodeSession,
     publications: AsyncStream<(Bool, EventFrame)>.Continuation,
+    configProfiles: AsyncStream<String?>.Continuation,
     cleanup: TalkPreparationBarrier,
     closed: AsyncStream<Void>.Continuation) async throws -> IOSNativeActionBinding
 {
@@ -605,7 +606,7 @@ private func connectNativeTalkCleanupGateway(
             #expect(frame["expectedProfileId"] as? String == "profile-a")
             payload = ["profile": ["id": "profile-a"]]
         case "talk.config":
-            #expect(frame["expectedProfileId"] as? String == "profile-a")
+            configProfiles.yield(frame["expectedProfileId"] as? String)
             #expect(params["includeSecrets"] as? Bool == true)
             payload = ["config": ["talk": ["resolved": [
                 "provider": "google", "config": [String: Any](),
@@ -4403,9 +4404,10 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         await gateway.disconnect()
     }
 
-    @Test(arguments: [false, true])
-    @MainActor func `retired native cleanup does not publish a global stop for its successor`(
-        incomingGlobalStop: Bool) async throws
+    @Test(arguments: [false, true], ["changed", "round-trip", "preexisting"])
+    @MainActor func `retired native cleanup preserves foreground selection and does not stop its successor`(
+        incomingGlobalStop: Bool,
+        selection: String) async throws
     {
         let keys = ["talk.enabled", VoiceWakePreferences.enabledKey]
         let previousValues = keys.map { ($0, UserDefaults.standard.object(forKey: $0)) }
@@ -4414,12 +4416,17 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         }
         let talk = TalkModeManager(allowSimulatorCapture: true)
         let appModel = NodeAppModel(talkMode: talk)
+        let nativeSessionKey = "agent:main:main"
+        let otherSessionKey = "agent:main:foreground"
+        let expectedForeground = selection == "round-trip" ? nativeSessionKey : otherSessionKey
+        appModel.focusChatSession(selection == "preexisting" ? otherSessionKey : nativeSessionKey)
         let gateway = appModel.operatorSession
         let firstStart = TalkPreparationBarrier()
         let secondStart = TalkPreparationBarrier()
         let cleanup = TalkPreparationBarrier()
         let (publications, publicationSink) = AsyncStream<(Bool, EventFrame)>.makeStream(
             bufferingPolicy: .bufferingNewest(32))
+        let (configProfiles, configProfileSink) = AsyncStream<String?>.makeStream()
         let (closed, closeSink) = AsyncStream<Void>.makeStream(bufferingPolicy: .bufferingNewest(1))
         var modes: [Bool] = []
         var delayedEvents: [EventFrame] = []
@@ -4437,6 +4444,7 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         var starts: [Task<Void, Error>] = []
         var cleanupIssued = false
         var cleanupFinished = false
+        var configProfileIterator = configProfiles.makeAsyncIterator()
         var closedIterator = closed.makeAsyncIterator()
         defer {
             talk._test_setStartEntryHandler(nil)
@@ -4453,7 +4461,11 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
         let result: Result<Void, Error>
         do {
             let binding = try await connectNativeTalkCleanupGateway(
-                gateway, publications: publicationSink, cleanup: cleanup, closed: closeSink)
+                gateway,
+                publications: publicationSink,
+                configProfiles: configProfileSink,
+                cleanup: cleanup,
+                closed: closeSink)
             appModel.setOperatorConnected(true)
             talk.attachGateway(gateway)
             talk.updateGatewayConnected(true)
@@ -4463,6 +4475,14 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
             }
             starts.append(first)
             await firstStart.waitUntilEntered()
+            #expect(try #require(await configProfileIterator.next()) == "profile-a")
+            if selection != "preexisting" {
+                appModel.focusChatSession(otherSessionKey)
+                if selection == "round-trip" {
+                    appModel.focusChatSession(nativeSessionKey)
+                }
+            }
+            #expect(talk.isUsingMainSessionKey(nativeSessionKey))
             #expect(UserDefaults.standard.bool(forKey: "talk.enabled"))
             #if targetEnvironment(simulator)
             appModel.setVoiceWakeEnabled(true)
@@ -4480,6 +4500,7 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
             } catch is CancellationError {}
             #expect(!talk.isEnabled)
             #expect(talk.activeNativeBinding == nil)
+            #expect(talk.isUsingMainSessionKey(expectedForeground))
             #expect(!UserDefaults.standard.bool(forKey: "talk.enabled"))
             #if targetEnvironment(simulator)
             await appModel.voiceWake._test_waitForScheduledStart()
@@ -4495,6 +4516,7 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
                 try await appModel.startNativeTalk(nativeBinding: binding, presentationIsCurrent: { true })
             })
             await secondStart.waitUntilEntered()
+            #expect(try #require(await configProfileIterator.next()) == "profile-a")
             let successor = try #require(talk.setEnabled(true, nativeBinding: binding))
             cleanup.release()
             _ = await closedIterator.next()
@@ -4529,6 +4551,30 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
             #expect(!talk.isEnabled)
             #expect(!talk.ownsNativeCall(successor.callID))
             #expect(!UserDefaults.standard.bool(forKey: "talk.enabled"))
+            #expect(talk.isUsingMainSessionKey(expectedForeground))
+
+            // Observe ordinary startup before permissions or capture. Neither entry
+            // point resynchronizes selection; cleanup above must have retained it.
+            replayEnabled = false
+            var ordinarySessionKey: String?
+            talk._test_setStartEntryHandler {
+                ordinarySessionKey = talk._test_mainSessionKey()
+                appModel.setTalkEnabled(false)
+            }
+            if incomingGlobalStop {
+                await appModel.handleOperatorGatewayServerEvent(EventFrame(
+                    type: "event",
+                    event: "talk.mode",
+                    payload: AnyCodable(["enabled": true, "phase": "enabled", "ts": 2]),
+                    seq: nil,
+                    stateversion: nil))
+            } else {
+                appModel.setTalkEnabled(true)
+            }
+            try #require(await waitForMainActorWork { ordinarySessionKey != nil })
+            #expect(try #require(await configProfileIterator.next()) == nil)
+            #expect(ordinarySessionKey == expectedForeground)
+            #expect(talk.activeNativeBinding == nil)
             result = .success(())
         } catch {
             result = .failure(error)
@@ -4543,6 +4589,7 @@ private final class TimingOutDeviceStatusService: DeviceStatusServicing {
             _ = await start.result
         }
         publicationSink.finish()
+        configProfileSink.finish()
         closeSink.finish()
         await replay.value
         await gateway.disconnect()

@@ -3646,7 +3646,7 @@ extension NodeAppModel {
     /// active owner. Otherwise a waiter can wake and retarget to the new chat.
     func synchronizeTalkSessionKey(_ sessionKey: String? = nil) {
         let effectiveSessionKey = sessionKey ?? self.chatSessionKey
-        guard !self.talkMode.isUsingMainSessionKey(effectiveSessionKey) else { return }
+        guard !self.talkMode.isUsingForegroundSessionKey(effectiveSessionKey) else { return }
         self.talkPttCommandEpoch &+= 1
         self.voiceWake.invalidatePendingCommand()
         self.talkMode.updateMainSessionKey(effectiveSessionKey)
