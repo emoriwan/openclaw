@@ -437,7 +437,7 @@ struct NativeActionGatewayWireTests {
                 try #require(response.id == spec.id && response.decision == expected)
             }
             try await withWebChatManagerLifetime(primaryConnection: presenter) { manager in
-                func present(_ id: String) async throws {
+                @MainActor func present(_ id: String) async throws {
                     let spec = try #require(descriptor.approvals.requests[id])
                     let session = OpenClawNativeSessionRef(
                         owner: .init(gatewayID: gatewayID, profileID: descriptor.bobProfileID),
@@ -516,8 +516,8 @@ struct NativeActionGatewayWireTests {
             for window in NSApp.windows where window.isVisible && window.title == "OpenClaw Command Approval" {
                 guard let root = window.contentView else { continue }
                 if self.approvalElements(in: root).contains(where: { element in
-                    [element.accessibilityLabel?(), element.accessibilityTitle?(),
-                     element.accessibilityValue?() as? String]
+                    let value: Any? = element.accessibilityValue?()
+                    return [element.accessibilityLabel?(), element.accessibilityTitle?(), value as? String]
                         .compactMap(\.self).contains(where: { $0.contains(command) })
                 }) {
                     return root
