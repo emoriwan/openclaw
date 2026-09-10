@@ -547,7 +547,8 @@ struct MacGatewayChatTransportMappingTests {
                     let (socket, response) = try #require(fixture.heldRequest.value)
                     var frame = try #require(JSONSerialization.jsonObject(with: response) as? [String: Any])
                     frame["payload"] = ["status": "started"]
-                    try fixture.heldRequest.setValue((socket, JSONSerialization.data(withJSONObject: frame)))
+                    let encoded = try JSONSerialization.data(withJSONObject: frame)
+                    fixture.heldRequest.setValue((socket, encoded))
                 }
                 fixture.releaseRequest()
             }
