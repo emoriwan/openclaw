@@ -22,7 +22,7 @@ import {
   usePreparedCatalogWorkerFixtures,
 } from "./test-helpers/prepared-model-catalog-worker-fixture.js";
 
-const { makeTempDir, getCreatedWorkerCount } = usePreparedCatalogWorkerFixtures();
+const { makeTempDir } = usePreparedCatalogWorkerFixtures();
 const createFleetFixture = createCatalogFleetFixture(makeTempDir);
 
 describe("Gateway catalog worker captures", () => {
@@ -50,6 +50,12 @@ describe("Gateway catalog worker captures", () => {
       });
     });
     const { snapshots, agentIds } = fixture;
+    const catalogThreads = () =>
+      new Set(
+        readCatalogDiscoveryCaptures(fixture.root)
+          .filter((capture) => capture.threadId !== threadId)
+          .map((capture) => capture.threadId),
+      );
     await loadCompletedFullCatalog(snapshots[0]!);
     const initialCaptures = new Set(
       readCatalogDiscoveryCaptures(fixture.root)
@@ -57,6 +63,8 @@ describe("Gateway catalog worker captures", () => {
         .map((capture) => capture.filename),
     );
     expect(initialCaptures.size).toBe(2);
+    const initialCatalogThreads = catalogThreads();
+    expect(initialCatalogThreads.size).toBe(1);
     const capturedRuntimeSources = () =>
       new Set(
         fs
@@ -68,7 +76,7 @@ describe("Gateway catalog worker captures", () => {
     const catalogs = await Promise.all(
       snapshots.map((snapshot) => loadCompletedFullCatalog(snapshot)),
     );
-    expect(getCreatedWorkerCount()).toBe(1);
+    expect(catalogThreads()).toEqual(initialCatalogThreads);
     expect(getPreparedModelCatalogWorkerPoolSnapshot()).toMatchObject({
       maxWorkers: 1,
       workers: 1,
@@ -132,6 +140,7 @@ describe("Gateway catalog worker captures", () => {
       expect(inventory()).toEqual(retained);
     }
     expect(footprint()).toEqual(initialFootprint);
+    expect(catalogThreads()).toEqual(initialCatalogThreads);
     await closePreparedModelRuntimeSnapshots();
     expect(fs.existsSync(captureRoot)).toBe(false);
   });

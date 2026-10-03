@@ -31,10 +31,7 @@ import {
   OTEL_EXPORTER_OTLP_TRACES_ENDPOINT_ENV,
   OTEL_EXPORTER_OTLP_TRACES_PROTOCOL_ENV,
 } from "./service-constants.js";
-import {
-  hasPreloadedOtelSdk,
-  resolveContentCapturePolicy,
-} from "./service-content-normalization.js";
+import { hasPreloadedOtelSdk } from "./service-content-normalization.js";
 import { createDiagnosticsEventHandler } from "./service-events.js";
 import {
   createExporterHealthEventEmitter,
@@ -53,7 +50,6 @@ import {
 import { createDiagnosticsLogExporter } from "./service-logs.js";
 import { createDiagnosticsMetrics } from "./service-metrics.js";
 import { registerOwnedSdkRuntime } from "./service-propagation.js";
-import { createDiagnosticsRecorderRuntime } from "./service-recorder-runtime.js";
 import { createHarnessRecorders } from "./service-recorders-harness.js";
 import { createModelRecorders } from "./service-recorders-model.js";
 import { createOperationsRecorders } from "./service-recorders-operations.js";
@@ -381,7 +377,7 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
       const serviceName =
         otel.serviceName?.trim() || process.env.OTEL_SERVICE_NAME || DEFAULT_SERVICE_NAME;
       const sampleRate = asFiniteNumberInRange(otel.sampleRate, { min: 0, max: 1 });
-      const contentCapturePolicy = resolveContentCapturePolicy(otel.captureContent);
+      const captureContent = otel.captureContent === true;
 
       const resource = resources.resourceFromAttributes({
         [ATTR_SERVICE_NAME]: serviceName,
@@ -559,7 +555,7 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
       const diagnosticMetrics = createDiagnosticsMetrics(meter, otel.metricNamePrefix);
 
       const diagnosticsLogs = createDiagnosticsLogExporter({
-        contentCapturePolicy,
+        captureContent,
         emitExporterEvent,
         flushIntervalMs: otel.flushIntervalMs,
         headers,
@@ -575,12 +571,12 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
       active.logProvider = diagnosticsLogs.logProvider;
       const { recordLogRecord, recordSecurityEvent } = diagnosticsLogs;
 
-      const recorderRuntime = createDiagnosticsRecorderRuntime({
-        contentCapturePolicy,
-        metrics: diagnosticMetrics,
-        traces: diagnosticsTrace,
+      const recorderRuntime = {
+        ...diagnosticMetrics,
+        ...diagnosticsTrace,
+        captureContent,
         tracesEnabled: tracesActive,
-      });
+      };
       const recorders = {
         ...createUsageRecorders(recorderRuntime),
         ...createOperationsRecorders(recorderRuntime),

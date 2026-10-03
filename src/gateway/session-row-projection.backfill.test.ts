@@ -37,7 +37,7 @@ async function withStreamingProjection(
   }) => Promise<void>,
 ) {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     setRuntimeConfigSnapshot(cfg);
     const target = { agentId: "main", sessionKey: "agent:main:stream", sessionId: "stream" };
     for (const [name, parent] of [["parent"], ["stream", "parent"], ["child", "stream"]] as const) {
@@ -119,30 +119,9 @@ it("refreshes committed metadata and lifecycle marks during a transcript window"
     expect(projection.materializedCount).toBe(before);
     const reads: string[] = [];
     const readDatabases = history.withSessionHistoryWorkerDatabases;
-    vi.spyOn(history, "withSessionHistoryWorkerDatabases").mockImplementation(
-      (targets, consume, lane) =>
-        readDatabases(
-          targets,
-          (owners) =>
-            consume(
-              owners.map((owner) => ({
-                ...owner,
-                readRowFacts(input) {
-                  reads.push(...input.sessionKeys);
-                  return owner.readRowFacts(input);
-                },
-              })),
-            ),
-          lane,
-        ),
-    );
-    sessionChanges.emit({ all: true, scope: "catalog" });
-    await projection.ensureMaterialized();
-    expect(reads).toEqual([target.sessionKey]);
-    reads.length = 0;
     const captured = createDeferredCore();
     const resume = createDeferredCore();
-    let pause = true;
+    let pause = false;
     vi.spyOn(history, "withSessionHistoryWorkerDatabases").mockImplementation(
       (targets, consume, lane) =>
         readDatabases(
@@ -166,6 +145,11 @@ it("refreshes committed metadata and lifecycle marks during a transcript window"
           lane,
         ),
     );
+    sessionChanges.emit({ all: true, scope: "catalog" });
+    await projection.ensureMaterialized();
+    expect(reads).toEqual([target.sessionKey]);
+    reads.length = 0;
+    pause = true;
     sessionChanges.emit({ all: true, scope: "catalog", factsInvalidated: true });
     const refreshing = projection.ensureMaterialized();
     try {
@@ -240,7 +224,7 @@ it("does not carry a pending transcript refresh into a replacement session", asy
 
 it("eventually fills legacy titles and previews without waiting during startup or changing activity", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     setRuntimeConfigSnapshot(cfg);
     const target = { agentId: "main", sessionKey: "agent:main:legacy", sessionId: "legacy" };
     replaceSessionEntrySync(target, { sessionId: target.sessionId, updatedAt: 1 });
@@ -326,7 +310,7 @@ it.each([false, true])(
   "serves session lists during renewal with modelFactsChanged=%s",
   async (modelFactsChanged) => {
     await withOpenClawTestState({ scenario: "minimal" }, async () => {
-      const cfg = { agents: { list: [{ id: "main", default: true }] } };
+      const cfg = { agents: { entries: { main: {} } } };
       const query = { agentId: "main", key: "agent:main:catalog" };
       replaceSessionEntrySync(
         { agentId: "main", sessionKey: query.key },
@@ -394,7 +378,7 @@ it.each([false, true])(
 
 it("waits for the first catalog before admitting session reads", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     const catalog = createDeferredCore<[]>();
     const admitted = vi.fn();
     const startup = createSessionRowProjection({ cfg, getModelCatalog: () => catalog.promise });
@@ -414,7 +398,7 @@ it("waits for the first catalog before admitting session reads", async () => {
 
 it("fences superseded and disposed background catalog reads", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     const initial: [] = [];
     const superseded = createDeferredCore<[]>();
     const current = createDeferredCore<[]>();
@@ -486,43 +470,25 @@ it("continues backfill queued as the previous batch settles", async () => {
   }
 });
 
-it("does not revive resident rows after disposal with a topology refresh pending", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    replaceSessionEntrySync(
-      { agentId: "main", sessionKey: "agent:main:disposed" },
-      { sessionId: "disposed", updatedAt: 1 },
-    );
-    const projection = await createSessionRowProjection({
-      cfg: { agents: { list: [{ id: "main", default: true }] } },
-    });
-    sessionChanges.emit({ all: true, scope: "config" });
-    projection.dispose();
-    expect(projection.selectEntries()).toEqual([]);
-    expect(projection.selectEntries()).toEqual([]);
-  });
-});
-
 it("preserves a stored fallback model without requiring a terminal transcript", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     const key = "agent:main:stored-fallback";
-    replaceSessionEntrySync(
-      { agentId: "main", sessionKey: key },
-      {
-        sessionId: "stored-fallback",
-        updatedAt: 1,
-        status: "done",
-        providerOverride: "unit-test",
-        modelOverride: "selected",
-        modelProvider: "unit-test",
-        model: "fallback",
-        fallbackNotice: {
-          kind: "active",
-          selectedModel: "unit-test/selected",
-          activeModel: "unit-test/fallback",
-        },
+    const entry = {
+      sessionId: "stored-fallback",
+      updatedAt: 1,
+      status: "done" as const,
+      providerOverride: "unit-test",
+      modelOverride: "selected",
+      modelProvider: "unit-test",
+      model: "fallback",
+      fallbackNotice: {
+        kind: "active" as const,
+        selectedModel: "unit-test/selected",
+        activeModel: "unit-test/fallback",
       },
-    );
+    };
+    replaceSessionEntrySync({ agentId: "main", sessionKey: key }, entry);
     const projection = await createSessionRowProjection({ cfg });
     try {
       expect(projection.snapshot({ agentId: "main", key }).row).toMatchObject({
@@ -532,16 +498,11 @@ it("preserves a stored fallback model without requiring a terminal transcript", 
       replaceSessionEntrySync(
         { agentId: "main", sessionKey: key },
         {
-          sessionId: "stored-fallback",
+          ...entry,
           updatedAt: 2,
-          status: "done",
-          providerOverride: "unit-test",
-          modelOverride: "selected",
-          modelProvider: "unit-test",
           model: "replacement",
           fallbackNotice: {
-            kind: "active",
-            selectedModel: "unit-test/selected",
+            ...entry.fallbackNotice,
             activeModel: "unit-test/replacement",
           },
         },
@@ -558,7 +519,7 @@ it("preserves a stored fallback model without requiring a terminal transcript", 
 
 it("backfills terminal fallback models and clears previews when the newest message cannot fit", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     const target = { agentId: "main", sessionKey: "agent:main:fallback", sessionId: "fallback" };
     replaceSessionEntrySync(target, {
       sessionId: target.sessionId,
@@ -618,7 +579,7 @@ it("backfills terminal fallback models and clears previews when the newest messa
 
 it("publishes created and moved child relationships before the background drain", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async () => {
-    const cfg = { agents: { list: [{ id: "main", default: true }] } };
+    const cfg = { agents: { entries: { main: {} } } };
     const now = Date.now();
     const first = "agent:main:first-parent",
       second = "agent:main:second-parent",

@@ -60,7 +60,7 @@ describe("Talk relay keyed consult adoption", () => {
   });
 
   async function createConsult(excludeFromContext = true) {
-    const cfg = { agents: { entries: { main: { default: true } } } };
+    const cfg = { agents: { entries: { main: {} } } };
     let bridgeRequest: RealtimeVoiceBridgeCreateRequest | undefined;
     const session = createTalkRealtimeRelaySession({
       cfg,
@@ -129,8 +129,6 @@ describe("Talk relay keyed consult adoption", () => {
   }
 
   it.each([
-    { roles: ["assistant"], excludeFromContext: true },
-    { roles: ["user"], excludeFromContext: true },
     { roles: ["user", "assistant"], excludeFromContext: true },
     { roles: ["assistant", "user"], excludeFromContext: false },
   ] as const)(

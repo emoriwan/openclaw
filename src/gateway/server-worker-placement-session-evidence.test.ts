@@ -176,6 +176,12 @@ describe("worker placement session evidence", () => {
         });
       }
       const database = openOpenClawAgentDatabase({ agentId: "main" });
+      // Retain an admitted reader so one later corrupt row does not block unrelated evidence.
+      expect(
+        readSessionIdentityEvidenceInDatabase(database, identities.slice(0, 2)).map(
+          (row) => row.status,
+        ),
+      ).toEqual(["current", "current"]);
       database.db
         .prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?")
         .run("{", identities[1]!.sessionKey);
@@ -250,7 +256,7 @@ describe("worker placement session evidence", () => {
   it("keeps required-table loss local to one agent during real placement discovery", async () => {
     const stateDir = tempDirs.make("openclaw-placement-partial-table-loss-");
     await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir }, async () => {
-      const cfg: OpenClawConfig = { agents: { list: [{ id: "main" }, { id: "healthy" }] } };
+      const cfg: OpenClawConfig = { agents: { entries: { main: {}, healthy: {} } } };
       setRuntimeConfigSnapshot(cfg, cfg);
       const broken = localPlacement("broken", "agent:main:broken");
       const healthy = localPlacement("healthy", "agent:healthy:healthy", "healthy");
@@ -297,7 +303,7 @@ describe("worker placement session evidence", () => {
       const storeTemplate = path.join(stateDir, "agents", "{agentId}", "sessions", "sessions.json");
       const cfg: OpenClawConfig = {
         session: { store: storeTemplate },
-        agents: { list: [{ id: "ops", default: true }] },
+        agents: { entries: { ops: {} } },
       };
       setRuntimeConfigSnapshot(cfg, cfg);
       const placement = localPlacement("session-canonical-main", "agent:main:main", "ops");
@@ -320,7 +326,7 @@ describe("worker placement session evidence", () => {
         session: {
           store: path.join(stateDir, "agents", "{agentId}", "sessions", "sessions.json"),
         },
-        agents: { list: [{ id: "ops", default: true }] },
+        agents: { entries: { ops: {} } },
       };
       setRuntimeConfigSnapshot(cfg, cfg);
       const placement = localPlacement("session-legacy-main", "agent:main:main", "ops");
@@ -369,7 +375,7 @@ describe("worker placement session evidence", () => {
         const storePath =
           route === "fixed" ? path.join(stateDir, "fixed", "shared.json") : undefined;
         const cfg: OpenClawConfig = {
-          agents: { list: [{ id: "main" }] },
+          agents: { entries: { main: {} } },
           ...(storePath ? { session: { store: storePath } } : {}),
         };
         setRuntimeConfigSnapshot(cfg, cfg);

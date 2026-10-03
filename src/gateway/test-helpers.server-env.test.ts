@@ -18,6 +18,7 @@ import {
   disconnectGatewayClient,
   startGatewayWithClient,
 } from "./test-helpers.e2e.js";
+import { acquireGatewayE2ePortBlock } from "./test-helpers.listener.js";
 import { testState } from "./test-helpers.runtime-state.js";
 import {
   installGatewayTestHooks,
@@ -59,7 +60,7 @@ async function closeListener(server: Server): Promise<void> {
 }
 
 describe("Gateway test environment lifecycle", () => {
-  it("owns an implicit E2E listener across startup and a rejected close", async () => {
+  it("owns an explicit E2E listener across startup and a rejected close", async () => {
     const configPath = process.env.OPENCLAW_CONFIG_PATH;
     assert(configPath);
     const serverModule = await import("./server.js");
@@ -79,6 +80,7 @@ describe("Gateway test environment lifecycle", () => {
       });
     const token = "retained-listener-token";
     const acquisition = startGatewayWithClient({
+      portClaim: await acquireGatewayE2ePortBlock(),
       cfg: { gateway: { auth: { mode: "token", token } } },
       configPath,
       token,
@@ -338,13 +340,9 @@ describe("Gateway test environment lifecycle", () => {
     },
   );
 
-  it.each([
-    { fixture: "session store", roster: "entries" },
-    { fixture: "config mock", roster: "entries" },
-    { fixture: "session store", roster: "list" },
-  ])(
-    "keeps authored config readable while the $fixture publishes canonical $roster overrides",
-    async ({ fixture, roster }) => {
+  it.each([{ fixture: "session store" }, { fixture: "config mock" }])(
+    "keeps authored config readable while the $fixture publishes canonical roster overrides",
+    async ({ fixture }) => {
       const actual = await vi.importActual<typeof import("../config/io.js")>("../config/io.js");
       const { writeConfigFile } = createGatewayConfigOverrides(actual);
       const configPath = process.env.OPENCLAW_CONFIG_PATH!;
@@ -356,10 +354,7 @@ describe("Gateway test environment lifecycle", () => {
       } satisfies AgentsConfig;
       await writeConfigFile({ agents, session: { reset: { idleMinutes: 30 } } });
       const fixtureEntries = { main: {}, fixture: { workspace } };
-      testState.agentsConfig =
-        roster === "list"
-          ? { list: [{ id: "main" }, { id: "fixture", workspace }] }
-          : { ownership: "explicit", entries: fixtureEntries };
+      testState.agentsConfig = { ownership: "explicit", entries: fixtureEntries };
       testState.agentConfig = { workspace, timeoutSeconds: 45 };
       const readAuthoredConfig = () =>
         actual.loadConfig({ pin: false, skipPluginValidation: true, skipShellEnvFallback: true });
@@ -389,7 +384,7 @@ describe("Gateway test environment lifecycle", () => {
         expect(readIdleMinutes()).toBe(60);
         const realConfig = actual.getRuntimeConfig();
         expect(realConfig.agents?.entries).toEqual(fixtureEntries);
-        expect(realConfig.agents?.list).toBeUndefined();
+        expect(Object.hasOwn(realConfig.agents ?? {}, "list")).toBe(false);
         expect(realConfig.agents?.defaults).toMatchObject({
           userTimezone: "UTC",
           workspace,

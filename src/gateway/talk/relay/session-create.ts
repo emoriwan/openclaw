@@ -25,11 +25,7 @@ import {
   scheduleForcedAgentConsult,
   submitRealtimeAgentConsultWorkingResponse,
 } from "./forced-consults.js";
-import {
-  buildTalkRealtimeRelayIssuePayload as relayIssuePayload,
-  createTalkRealtimeRelayIssue as realtimeRelayIssue,
-  resolveTalkRealtimeRelayPresentation,
-} from "./issues.js";
+import { resolveTalkRealtimeRelayPresentation } from "./issues.js";
 import {
   adoptTalkRealtimeRelaySession,
   cancelTalkRealtimeRelayProviderToolCall,
@@ -106,6 +102,14 @@ export function createTalkRealtimeRelaySession(
       ...event,
       ...(talkEvent ? { talkEvent: harness.emit(talkEvent) } : {}),
     });
+  const realtimeRelayIssue = (message: string, phase: string) => ({
+    code: "realtime_unavailable" as const,
+    message,
+    provider: params.provider.id,
+    ...(publicModel ? { model: publicModel } : {}),
+    transport: "gateway-relay" as const,
+    phase,
+  });
   let currentOutputItemId: string | undefined;
   let playbackTurnId: string | undefined;
   let ready = false;
@@ -279,8 +283,7 @@ export function createTalkRealtimeRelaySession(
       },
       clearAudio: clearPlayback,
       sendMark: (markName) => {
-        const relay = getActiveRelay();
-        if (!relay) {
+        if (!getActiveRelay()) {
           return;
         }
         const outputTurnId = outputOwnership.resolve(false);
@@ -351,12 +354,11 @@ export function createTalkRealtimeRelaySession(
       if (event.type === "tool.call.cancelled" && event.itemId) {
         const relayCallId = cancelTalkRealtimeRelayProviderToolCall(relay, event.itemId);
         if (relayCallId) {
-          const cancelledEvent = {
+          broadcastToOwner(params.context, params.connId, {
             relaySessionId,
-            type: "toolCallCancelled" as const,
+            type: "toolCallCancelled",
             callId: relayCallId,
-          };
-          broadcastToOwner(params.context, params.connId, cancelledEvent);
+          });
         }
         return;
       }
@@ -370,8 +372,7 @@ export function createTalkRealtimeRelaySession(
       }
     },
     onResponseDone: (outcome) => {
-      const relay = getActiveRelay();
-      if (!relay) {
+      if (!getActiveRelay()) {
         return;
       }
       const responseId = outcome.responseId ?? outputOwnership.responseId;
@@ -396,17 +397,14 @@ export function createTalkRealtimeRelaySession(
       });
       currentOutputItemId = undefined;
       if (outcome.status === "failed" || outcome.status === "incomplete") {
-        const issue = realtimeRelayIssue({
-          message: publicError(outcome.error ?? outcome).message,
-          provider: params.provider.id,
-          model: publicModel,
-          phase: "response",
-        });
+        const issue = realtimeRelayIssue(publicError(outcome.error ?? outcome).message, "response");
         const errorTalkEvent = harness.talk.recentEvents.findLast(
           (event) => event.type === "session.error" && event.payload === outcome,
         );
         broadcastToOwner(params.context, params.connId, {
-          ...relayIssuePayload(relaySessionId, issue),
+          relaySessionId,
+          type: "error",
+          ...issue,
           ...(errorTalkEvent ? { talkEvent: { ...errorTalkEvent, payload: issue } } : {}),
         });
       }
@@ -552,18 +550,16 @@ export function createTalkRealtimeRelaySession(
         }
         return;
       }
-      const issue = realtimeRelayIssue({
-        message: publicError(error).message,
-        provider: params.provider.id,
-        model: publicModel,
-        phase: ready ? "stream" : "connect",
-      });
+      const issue = realtimeRelayIssue(publicError(error).message, ready ? "stream" : "connect");
       failureEmitted = true;
-      emit(relayIssuePayload(relaySessionId, issue), {
-        type: "session.error",
-        payload: issue,
-        final: true,
-      });
+      emit(
+        { relaySessionId, type: "error", ...issue },
+        {
+          type: "session.error",
+          payload: issue,
+          final: true,
+        },
+      );
     },
     onClose: (reason) => {
       void runControl.close();
@@ -573,17 +569,18 @@ export function createTalkRealtimeRelaySession(
         return;
       }
       if (!active.closing && !ready && !failureEmitted) {
-        const issue = realtimeRelayIssue({
-          message: "Realtime provider closed before the session became ready.",
-          provider: params.provider.id,
-          model: publicModel,
-          phase: "connect",
-        });
-        emit(relayIssuePayload(relaySessionId, issue), {
-          type: "session.error",
-          payload: issue,
-          final: true,
-        });
+        const issue = realtimeRelayIssue(
+          "Realtime provider closed before the session became ready.",
+          "connect",
+        );
+        emit(
+          { relaySessionId, type: "error", ...issue },
+          {
+            type: "session.error",
+            payload: issue,
+            final: true,
+          },
+        );
       }
       void closeRelaySession(active, reason);
     },
@@ -684,18 +681,16 @@ export function createTalkRealtimeRelaySession(
     if (active !== relay) {
       return;
     }
-    const issue = realtimeRelayIssue({
-      message: publicError(error).message,
-      provider: params.provider.id,
-      model: publicModel,
-      phase: "connect",
-    });
+    const issue = realtimeRelayIssue(publicError(error).message, "connect");
     failureEmitted = true;
-    emit(relayIssuePayload(relaySessionId, issue), {
-      type: "session.error",
-      payload: issue,
-      final: true,
-    });
+    emit(
+      { relaySessionId, type: "error", ...issue },
+      {
+        type: "session.error",
+        payload: issue,
+        final: true,
+      },
+    );
     void closeRelaySession(active, "error");
   });
 
